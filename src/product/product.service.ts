@@ -51,6 +51,10 @@ async create(
       status: createProductDto.status || 'IN_STORE',
       defectiveQuantity: 0,
       bonusPercentage: createProductDto.bonusPercentage || 0,
+      sizeType: (createProductDto as any).sizeType || 'NONE',
+      sizeLabel: (createProductDto as any).sizeLabel,
+      sizeNumber: (createProductDto as any).sizeNumber,
+      areaSqm: (createProductDto as any).areaSqm,
     },
   });
 
@@ -209,6 +213,10 @@ async update(
       status: updateProductDto.status,
       quantity: updateProductDto.quantity,
       bonusPercentage: updateProductDto.bonusPercentage,
+      sizeType: (updateProductDto as any).sizeType,
+      sizeLabel: (updateProductDto as any).sizeLabel,
+      sizeNumber: (updateProductDto as any).sizeNumber,
+      areaSqm: (updateProductDto as any).areaSqm,
     },
   });
 
@@ -684,6 +692,11 @@ return this.prisma.$transaction(async (tx) => {
       categoryId: categoryId,
       status: (status || 'IN_STORE') as ProductStatus,
       bonusPercentage: row['bonusPercentage'] ? Number(row['bonusPercentage']) : 0,
+      // Optional size fields from Excel
+      ...(row['sizeType'] ? { sizeType: String(row['sizeType']) as any } : {}),
+      ...(row['sizeLabel'] ? { sizeLabel: String(row['sizeLabel']) } : {}),
+      ...(row['sizeNumber'] ? { sizeNumber: Number(row['sizeNumber']) } : {}),
+      ...(row['areaSqm'] ? { areaSqm: Number(row['areaSqm']) } : {}),
     };
 
     const existing = await tx.product.findUnique({

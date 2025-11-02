@@ -1891,9 +1891,6 @@ const updatedTransaction = await this.prisma.transaction.update({
       }
 
       console.log(' BONUS CALCULATION COMPLETED\n');
-
-      // 3-bosqich: Bonus mahsulotlar qiymatini ham hisobga olgan holda jarimani aniqlash
-      // Penalty faqat grossDiffAfterBonusCost manfiy bo'lsa yaratiladi
       console.log(' Penalty check (with bonus cost): selling=', sellingTotal, ' cost+bonus=', costPlusBonus, ' grossDiff=', grossDiffAfterBonusCost);
       if (grossDiffAfterBonusCost < 0) {
         const netDeficit = Math.abs(grossDiffAfterBonusCost);
@@ -1912,7 +1909,6 @@ const updatedTransaction = await this.prisma.transaction.update({
               totalValue: priceInUzs * bp.quantity
             });
           }
-          // Bonus mahsulotlar nomi va modeli haqida qo'shimcha ma'lumot
           const bonusProductsInfo = (bonusProducts && bonusProducts.length > 0)
             ? ' Bonus mahsulotlar: ' + bonusProducts
                 .map(bp => `${bp.product?.name || 'Номаълум махсулот'} (${bp.product?.model || '-'}) qty=${bp.quantity}`)

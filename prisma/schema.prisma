@@ -125,6 +125,15 @@ enum ProductStatus {
   EXCHANGED
 }
 
+// Product size typing for different product kinds (carpet, clothing, motorcycle)
+enum ProductSizeType {
+  NONE
+  AREA_SQM
+  CLOTHING_ALPHA
+  CLOTHING_NUMERIC
+  FREE_TEXT
+}
+
 model Branch {
   id               Int                    @id @default(autoincrement())
   name             String
@@ -267,6 +276,11 @@ model Product {
   deletedAt         DateTime?
   createdAt         DateTime?                 @default(now())
   updatedAt         DateTime?                 @updatedAt
+  // Size fields
+  sizeType          ProductSizeType           @default(NONE)
+  sizeLabel         String?                   @db.VarChar(100) // e.g., XL, 52, 2x3
+  sizeNumber        Float? // numeric size when applicable (e.g., 52 -> 52)
+  areaSqm           Float? // carpet area in square meters
   branch            Branch                    @relation(fields: [branchId], references: [id], onDelete: Cascade)
   category          Category                  @relation(fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   transactions      TransactionItem[]
