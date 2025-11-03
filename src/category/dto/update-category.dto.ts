@@ -1,4 +1,5 @@
-import { IsString, IsOptional, MaxLength, IsInt, IsPositive } from 'class-validator';
+import { IsString, IsOptional, MaxLength, IsInt, IsPositive, IsEnum } from 'class-validator';
+import { CategoryTypeDto } from './create-category.dto';
 
 export class UpdateCategoryDto {
   @IsOptional()
@@ -15,4 +16,8 @@ export class UpdateCategoryDto {
   @IsInt()
   @IsPositive()
   branchId?: number;
+
+  @IsOptional()
+  @IsEnum(CategoryTypeDto)
+  type?: CategoryTypeDto;
 }

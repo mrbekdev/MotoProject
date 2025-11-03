@@ -152,6 +152,11 @@ export class CreateTransactionDto {
   deliveryAddress?: string; // Delivery address for customer
 
   @IsOptional()
+  @IsNumber()
+  @IsPositive()
+  deliveryUserId?: number; // Auditor assigned for delivery
+
+  @IsOptional()
   @ValidateNested()
   @Type(() => CustomerDto)
   customer?: CustomerDto;

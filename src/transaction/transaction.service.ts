@@ -104,719 +104,92 @@ export class TransactionService {
 
     // Transaction yaratish
     const { cashierId, ...cleanTransactionData } = transactionData as any;
-    const transaction = await this.prisma.transaction.create({
-      data: {
-        ...cleanTransactionData,
-        customerId,
-        userId: createdByUserId || null, // yaratgan foydalanuvchi
-        soldByUserId: soldByUserId || null, // sotgan kassir
-        upfrontPaymentType: (transactionData as any).upfrontPaymentType || 'CASH', // Default to CASH if not specified
-        termUnit: (transactionData as any).termUnit || 'MONTHS', // Default to MONTHS if not specified
-        // Ensure totals are consistent and interest is applied once at sale time
-        total: computedTotal,
-        finalTotal: finalTotalOnce,
-        remainingBalance: remainingWithInterest,
-        // Kunlik bo'lib to'lash uchun qo'shimcha ma'lumotlar
-        ...((transactionData as any).termUnit === 'DAYS' ? {
-          days: (transactionData as any).days || 0,
-          months: 0 // Kunlik bo'lib to'lashda oylar 0
-        } : {
-          months: (transactionData as any).months || 0,
-          days: 0 // Oylik bo'lib to'lashda kunlar 0
-        }),
-        items: {
-          create: items.map(item => ({
-            productId: item.productId,
-            quantity: item.quantity,
-            price: item.price,
-            sellingPrice: item.sellingPrice || item.price, // Use selling price if provided, otherwise use price
-            originalPrice: item.originalPrice || item.price, // Use original price if provided, otherwise use price
-            total: item.total || (item.price * item.quantity), // Use provided total or calculate
-            creditMonth: item.creditMonth,
-            creditPercent: item.creditPercent,
-            monthlyPayment: item.monthlyPayment || this.calculateMonthlyPayment(item)
-          }))
-        }
-      },
-      include: {
-        customer: true,
-        user: true,
-        soldBy: true,
-        items: {
-          include: {
-            product: true
-          }
-        },
-        paymentSchedules: true
-      }
-    });
-
-    // Kredit yoki Bo'lib to'lash bo'lsa, to'lovlar jadvalini yaratish
-    if (transaction.paymentType === PaymentType.CREDIT || transaction.paymentType === PaymentType.INSTALLMENT) {
-      // Kunlik yoki oylik to'lovlarni tekshirish
-      const isDays = (transaction as any).termUnit === 'DAYS';
-      if (isDays) {
-        // Kunlik bo'lib to'lash uchun 1 ta payment schedule
-        await this.createDailyPaymentSchedule(transaction.id, transaction.items, createTransactionDto.downPayment || 0);
-      } else {
-        // Oylik bo'lib to'lash uchun har oy uchun alohida schedule
-        await this.createPaymentSchedule(transaction.id, transaction.items, createTransactionDto.downPayment || 0);
-      }
-    }
-
-    // Mahsulot miqdorlarini yangilash
-    await this.updateProductQuantities(transaction);
-
-    // Avtomatik bonus hisoblash va yaratish (faqat mijozga sotish uchun)
-    // MUHIM: Bonus products avval qo'shilishi kerak, keyin bonus hisoblash
-    if (soldByUserId && transactionData.type === TransactionType.SALE) {
-      const cashierId = (transactionData as any).cashierId || userId;
-      
-      // Bonus hisoblashni 2 soniya kechiktirish - bonus products qo'shilishini kutish uchun
-      setTimeout(async () => {
-        try {
-          await this.calculateAndCreateSalesBonuses(transaction, soldByUserId, cashierId);
-        } catch (error) {
-          console.error('Delayed bonus calculation error:', error);
-        }
-      }, 2000);
-    }
-
-    return transaction;
-  }
-
-  private calculateMonthlyPayment(item: any): number {
-    if (!item.creditMonth || !item.creditPercent) return 0;
-    
-    const totalWithInterest = item.price * item.quantity * (1 + item.creditPercent);
-    return totalWithInterest / item.creditMonth;
-  }
-
-  private async createDailyPaymentSchedule(transactionId: number, items: any[], downPayment: number = 0) {
-    const schedules: any[] = [];
-
-    // Aggregate principal and determine weighted interest and days
-    let totalPrincipal = 0;
-    let weightedPercentSum = 0;
-    let percentWeightBase = 0;
-    let totalDays = 0;
-
-    for (const item of items) {
-      const principal = (item.price || 0) * (item.quantity || 0);
-      totalPrincipal += principal;
-      if (item.creditPercent) {
-        weightedPercentSum += principal * (item.creditPercent || 0);
-        percentWeightBase += principal;
-      }
-      if (item.creditMonth) { // creditMonth field kunlar sonini saqlaydi
-        totalDays = Math.max(totalDays, item.creditMonth || 0);
-      }
-    }
-
-    if (totalPrincipal > 0 && totalDays > 0) {
-      // To'g'ri hisoblash: oldindan to'lovni ayirib, keyin foiz qo'shish
-      const upfrontPayment = downPayment || 0;
-      const remainingPrincipal = Math.max(0, totalPrincipal - upfrontPayment);
-      const effectivePercent = percentWeightBase > 0 ? (weightedPercentSum / percentWeightBase) : 0;
-      
-
-      
-      const interestAmount = remainingPrincipal * effectivePercent;
-      const remainingWithInterest = remainingPrincipal + interestAmount;
-      
-      console.log('interestAmount:', interestAmount);
-      console.log('remainingWithInterest:', remainingWithInterest);
-      console.log('totalDays:', totalDays);
-
-      // Kunlik bo'lib to'lash uchun faqat 1 ta payment schedule yaratish
-      // Mijoz bu kunlar ichida qolgan summani to'lab ketishi kerak
-      schedules.push({
-        transactionId,
-        month: 1, // Faqat 1 ta entry
-        payment: remainingWithInterest, // To'liq qolgan summa
-        remainingBalance: remainingWithInterest, // Kunlik bo'lib to'lashda qolgan summa to'liq bo'lishi kerak
-        isPaid: false,
-        paidAmount: 0,
-        dueDate: new Date(Date.now() + totalDays * 24 * 60 * 60 * 1000), // Kunlar soni keyin to'lov muddati
-        isDailyInstallment: true, // Bu kunlik bo'lib to'lash ekanligini belgilash
-        daysCount: totalDays, // Kunlar sonini saqlash
-        // Kunlik bo'lib to'lash uchun qo'shimcha ma'lumotlar
-        installmentType: 'DAILY', // Kunlik bo'lib to'lash turi
-        totalDays: totalDays, // Jami kunlar soni
-        remainingDays: totalDays // Qolgan kunlar soni
-      });
-    }
-
-    if (schedules.length > 0) {
-      await this.prisma.paymentSchedule.createMany({
-        data: schedules
-      });
-    }
-  }
-
-  private async createPaymentSchedule(transactionId: number, items: any[], downPayment: number = 0) {
-    const schedules: any[] = [];
-
-    // Aggregate principal and determine weighted interest and months
-    let totalPrincipal = 0;
-    let weightedPercentSum = 0;
-    let percentWeightBase = 0;
-    let totalMonths = 0;
-
-    for (const item of items) {
-      const principal = (item.price || 0) * (item.quantity || 0);
-      totalPrincipal += principal;
-      if (item.creditPercent) {
-        weightedPercentSum += principal * (item.creditPercent || 0);
-        percentWeightBase += principal;
-      }
-      if (item.creditMonth) {
-        totalMonths = Math.max(totalMonths, item.creditMonth || 0);
-      }
-    }
-
-    if (totalPrincipal > 0 && totalMonths > 0) {
-      // To'g'ri hisoblash: oldindan to'lovni ayirib, keyin foiz qo'shish
-      const upfrontPayment = downPayment || 0;
-      const remainingPrincipal = Math.max(0, totalPrincipal - upfrontPayment);
-      const effectivePercent = percentWeightBase > 0 ? (weightedPercentSum / percentWeightBase) : 0;
-      
-
-      
-      const interestAmount = remainingPrincipal * effectivePercent;
-      const remainingWithInterest = remainingPrincipal + interestAmount;
-      const monthlyPayment = remainingWithInterest / totalMonths;
-      let remainingBalance = remainingWithInterest;
-      
-      console.log('interestAmount:', interestAmount);
-      console.log('remainingWithInterest:', remainingWithInterest);
-      console.log('monthlyPayment:', monthlyPayment);
-
-      for (let month = 1; month <= totalMonths; month++) {
-        // For the last month, use the exact remaining balance to avoid floating point errors
-        const currentPayment = month === totalMonths ? remainingBalance : monthlyPayment;
-        remainingBalance -= currentPayment;
-        schedules.push({
-          transactionId,
-          month,
-          payment: currentPayment,
-          remainingBalance: Math.max(0, remainingBalance),
-          isPaid: false,
-          paidAmount: 0,
-          // Oylik bo'lib to'lash uchun qo'shimcha ma'lumotlar
-          installmentType: 'MONTHLY', // Oylik bo'lib to'lash turi
-          totalMonths: totalMonths, // Jami oylar soni
-          remainingMonths: totalMonths - month + 1 // Qolgan oylar soni
-        });
-      }
-    }
-
-    if (schedules.length > 0) {
-      await this.prisma.paymentSchedule.createMany({
-        data: schedules
-      });
-    }
-  }
-
-  private async updateProductQuantities(transaction: any) {
-    for (const item of transaction.items) {
-      if (item.productId) {
-        // Mahsulotni ID bo'yicha topish (branch bilan cheklamaymiz)
-        const product = await this.prisma.product.findUnique({
-          where: { id: item.productId }
-        });
-
-        if (!product) continue;
-
-        // Agar mahsulot branchi transaction.fromBranchId dan farq qilsa, ogohlantirib, davom etamiz
-        if (product.branchId !== transaction.fromBranchId) {
-          console.log(`⚠️ Product ${product.id} branch (${product.branchId}) differs from fromBranchId (${transaction.fromBranchId}) for transaction ${transaction.id}. Proceeding with actual product branch.`);
-        }
-
-        let newQuantity = product.quantity;
-        let newStatus = product.status;
-
-        if (transaction.type === 'SALE') {
-          // Sotish - mahsulot sonidan kamaytirish
-          newQuantity = Math.max(0, product.quantity - item.quantity);
-          newStatus = newQuantity === 0 ? 'SOLD' : 'IN_STORE';
-        } else if (transaction.type === 'PURCHASE') {
-          // Kirim - mahsulot soniga qo'shish
-          newQuantity = product.quantity + item.quantity;
-          newStatus = 'IN_WAREHOUSE';
-        }
-        // TRANSFER uchun alohida metod ishlatiladi - updateProductQuantitiesForTransfer
-
-        await this.prisma.product.update({
-          where: { id: item.productId },
-          data: {
-            quantity: newQuantity,
-            status: newStatus
-          }
-        });
-      }
-    }
-  }
-
-  async findAll(query: any = {}) {
-    const {
-      page = '1',
-      limit = query.limit === 'all' ? undefined : (query.limit || 'all'),
-      type,
-      status,
-      branchId,
-      customerId,
-      userId,
-      startDate,
-      endDate,
-      paymentType,
-      upfrontPaymentType,
-      productId
-    } = query;
-
-    // Parse and validate page and limit
-    const parsedPage = parseInt(page) || 1;
-    const parsedLimit = limit && limit !== 'all' ? parseInt(limit) : undefined;
-  
-    console.log('=== BACKEND DEBUG ===');
-    console.log('Query params:', query);
-    console.log('BranchId:', branchId);
-    console.log('UserId:', userId);
-  
-    const where: any = {};
-    
-    if (type) where.type = type;
-    if (status) where.status = status;
-    if (branchId) {
-      // BranchId orqali filtrlash - bu filialdan chiqgan yoki kirgan transactionlarni olish
-      where.OR = [
-        { fromBranchId: parseInt(branchId) },
-        { toBranchId: parseInt(branchId) }
-      ];
-      console.log('Where clause:', where);
-    }
-    if (customerId) where.customerId = parseInt(customerId);
-    if (userId) {
-      // Filter by soldByUserId or userId (who created or sold the transaction)
-      where.OR = where.OR ? [
-        ...where.OR,
-        { soldByUserId: parseInt(userId) },
-        { userId: parseInt(userId) }
-      ] : [
-        { soldByUserId: parseInt(userId) },
-        { userId: parseInt(userId) }
-      ];
-    }
-    if (paymentType) where.paymentType = paymentType;
-    if (upfrontPaymentType) where.upfrontPaymentType = upfrontPaymentType;
-    if (productId) {
-      where.items = {
-        some: {
-          productId: parseInt(productId)
-        }
-      };
-    }
-    
-    if (startDate || endDate) {
-      where.createdAt = {};
-      if (startDate) where.createdAt.gte = new Date(startDate);
-
-      if (endDate) where.createdAt.lte = new Date(endDate);
-    }
-
-    const transactions = await this.prisma.transaction.findMany({
-      where,
-      include: {
-        customer: true,
-        user: true,
-        soldBy: true,
-        fromBranch: true,
-        toBranch: true,
-        items: {
-          include: {
-            product: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-      skip: parsedLimit ? (parsedPage - 1) * parsedLimit : 0,
-      take: parsedLimit,
-    });
-
-    const total = await this.prisma.transaction.count({ where });
-
-    return {
-      transactions,
-      pagination: {
-        page: parsedPage,
-        limit: parsedLimit || total,
-        total,
-        pages: parsedLimit ? Math.ceil(total / parsedLimit) : 1
-      }
-    };
-  }
-
-  async findByProductId(productId: number, month?: string) {
-    console.log(`Finding transactions for productId: ${productId}`);
-    
-    // First, let's check if the product exists
-    const product = await this.prisma.product.findUnique({
-      where: { id: productId }
-    });
-    
-    if (!product) {
-      console.log(`Product with ID ${productId} not found`);
-      return {
-        transactions: [],
-        statusCounts: { PENDING: 0, COMPLETED: 0, CANCELLED: 0, total: 0 },
-        typeCounts: { SALE: 0, PURCHASE: 0, TRANSFER: 0, RETURN: 0, WRITE_OFF: 0, STOCK_ADJUSTMENT: 0 }
-      };
-    }
-
-    console.log(`Product found: ${product.name}`);
-
-    // Build where clause with optional month filter
-    const whereClause: any = {
-      items: {
-        some: {
-          productId: productId
-        }
-      }
-    };
-
-    // Add month filter if provided
-    if (month) {
-      const [year, monthNum] = month.split('-');
-      const startDate = new Date(parseInt(year), parseInt(monthNum) - 1, 1);
-      const endDate = new Date(parseInt(year), parseInt(monthNum), 0, 23, 59, 59);
-      
-      whereClause.createdAt = {
-        gte: startDate,
-        lte: endDate
-      };
-      
-      console.log(`Filtering by month: ${month}, from ${startDate} to ${endDate}`);
-    }
-
-    const transactions = await this.prisma.transaction.findMany({
-      where: whereClause,
-      include: {
-        customer: true,
-        user: true,
-        soldBy: true,
-        fromBranch: true,
-        toBranch: true,
-        items: {
-          where: {
-            productId: productId
-          },
-          include: {
-            product: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    // Calculate totalAmount for each transaction if it's missing
-    const transactionsWithAmounts = transactions.map(transaction => {
-      let calculatedTotal = (transaction as any).totalAmount;
-      
-      // If totalAmount is 0 or null, calculate from items
-      if (!calculatedTotal || calculatedTotal === 0) {
-        calculatedTotal = transaction.items.reduce((sum, item) => {
-          return sum + (item.total || (item.quantity * item.price));
-        }, 0);
-      }
-      
-      return {
-        ...transaction,
-        totalAmount: calculatedTotal
-      } as any;
-    });
-
-    console.log(`Found ${transactions.length} transactions for product ${productId}`);
-
-    // Calculate status counts
-    const statusCounts = {
-      PENDING: 0,
-      COMPLETED: 0,
-      CANCELLED: 0,
-      total: transactions.length
-    };
-
-    const typeCounts = {
-      SALE: 0,
-      PURCHASE: 0,
-      TRANSFER: 0,
-      RETURN: 0,
-      WRITE_OFF: 0,
-      STOCK_ADJUSTMENT: 0
-    };
-
-    transactionsWithAmounts.forEach(transaction => {
-      statusCounts[transaction.status]++;
-      typeCounts[transaction.type]++;
-    });
-
-    console.log('Status counts:', statusCounts);
-    console.log('Type counts:', typeCounts);
-    console.log('Transactions with amounts:', transactionsWithAmounts.map(t => ({ id: t.id, totalAmount: t.totalAmount, status: t.status, type: t.type })));
-
-    return {
-      transactions: transactionsWithAmounts,
-      statusCounts,
-      typeCounts
-    };
-  }
-
-  async findOne(id: number) {
-    // Validate that id is provided and is a valid number
-    if (id === undefined || id === null || isNaN(id) || id <= 0) {
-      throw new BadRequestException('Invalid transaction ID provided');
-    }
-
-    let transaction = await this.prisma.transaction.findUnique({
-      where: { id },
-      include: {
-        customer: true,
-        user: true,
-        soldBy: true,
-        fromBranch: true,
-        toBranch: true,
-        items: {
-          include: {
-            product: true
-          }
-        },
-        paymentSchedules: {
-          orderBy: { month: 'asc' },
-          include: { paidBy: true }
-        }
-      }
-    });
-
-    if (!transaction) {
-      throw new NotFoundException('Transaction not found');
-    }
-
-    // Hydrate missing products for a single transaction
-    const hydrated = await this.hydrateMissingProducts([transaction]);
-    return hydrated[0];
-  }
-
-    async findByType(type: string) {
-    return this.prisma.transaction.findMany({
-      where: { 
-        type: type as TransactionType,
-        status: { not: 'CANCELLED' }
-      },
-      include: {
-        customer: true,
-        items: {
-          include: {
-            product: true
-          }
-        },
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            phone: true
-          }
-        }
-      },
-      orderBy: {
-        createdAt: 'desc'
-      }
-    });
-  }
-
-  async updateStatus(id: number, status: string, userId: number) {
-    const validStatuses = ['PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
-    if (!validStatuses.includes(status)) {
-      throw new BadRequestException('Invalid status');
-    }
-
-    const transaction = await this.prisma.transaction.findUnique({
-      where: { id },
-      include: { customer: true }
-    });
-
-    if (!transaction) {
-      throw new NotFoundException('Transaction not found');
-    }
-
-    // If marking as completed, ensure all items are properly processed
-    if (status === 'COMPLETED') {
-      const pendingItems = await this.prisma.transactionItem.findMany({
-        where: {
-          transactionId: id,
-          status: 'PENDING'
-        }
-      });
-
-      if (pendingItems.length > 0) {
-        throw new BadRequestException('Cannot complete transaction with pending items');
-      }
-    }
-
-    // Update the transaction status
-const updatedTransaction = await this.prisma.transaction.update({
-  where: { id },
-  data: {
-    status: status as TransactionStatus,
-    updatedAt: new Date(),
-    updatedBy: { connect: { id: +userId } }
-  },
-  include: {
-    customer: true,
-    items: {
-      include: {
-        product: true
-      }
-    }
-  }
-});
-
-
-    // If this is a delivery being marked as completed, update inventory
-    if (status === 'COMPLETED' && transaction.type === 'DELIVERY') {
-      await this.processDeliveryCompletion(transaction);
-    }
-
-    return updatedTransaction;
-  }
-
-    private async processDeliveryCompletion(transaction: any) {
-    // Update inventory for each item in the delivery
-    for (const item of transaction.items) {
-      await this.prisma.product.update({
-        where: { id: item.productId },
+    const createdTransaction = await this.prisma.$transaction(async (tx) => {
+      const transaction = await tx.transaction.create({
         data: {
-          quantity: {
-            decrement: item.quantity
-          }
-        }
-      });
-    }
-  }
-
-
-  // Attach product details to items that have productId but product is null
-  private async hydrateMissingProducts(transactions: any[]) {
-    try {
-      const missingIdsSet = new Set<number>();
-      for (const tr of transactions) {
-        if (!Array.isArray(tr?.items)) continue;
-        for (const it of tr.items) {
-          const raw = it?.productId;
-          const pid = raw == null ? null : Number(raw);
-          if (pid && !it?.product) missingIdsSet.add(pid);
-        }
-      }
-      const missingIds = Array.from(missingIdsSet);
-      if (missingIds.length === 0) return transactions;
-
-      const products = await this.prisma.product.findMany({
-        where: { id: { in: missingIds } },
-      });
-      const idToProduct: Record<number, any> = {};
-      for (const p of products) idToProduct[p.id] = p;
-
-      for (const tr of transactions) {
-        if (!Array.isArray(tr?.items)) continue;
-        for (const it of tr.items) {
-          if (it && it.productId != null && !it.product) {
-            const pid = Number(it.productId);
-            it.product = (pid && idToProduct[pid]) ? idToProduct[pid] : null;
-          }
-        }
-      }
-      return transactions;
-    } catch (e) {
-      // If anything goes wrong, return original to avoid breaking flow
-      return transactions;
-    }
-  }
-
-  async update(id: number, updateTransactionDto: UpdateTransactionDto) {
-    // Validate that id is provided and is a valid number
-    if (id === undefined || id === null || isNaN(id) || id <= 0) {
-      throw new BadRequestException('Invalid transaction ID provided');
-    }
-
-    const transaction = await this.findOne(id);
-    
-    if (transaction.status === TransactionStatus.COMPLETED) {
-      throw new BadRequestException('Completed transactions cannot be modified');
-    }
-
-    return this.prisma.transaction.update({
-      where: { id },
-      data: updateTransactionDto,
-      include: {
-        customer: true,
-        user: true,
-        soldBy: true,
-        fromBranch: true,
-        toBranch: true,
-        items: {
-          include: {
-            product: true
+          ...cleanTransactionData,
+          customerId,
+          userId: createdByUserId || null, // yaratgan foydalanuvchi
+          soldByUserId: soldByUserId || null, // sotgan kassir
+          upfrontPaymentType: (transactionData as any).upfrontPaymentType || 'CASH', // Default to CASH if not specified
+          termUnit: (transactionData as any).termUnit || 'MONTHS', // Default to MONTHS if not specified
+          // Ensure totals are consistent and interest is applied once at sale time
+          total: computedTotal,
+          finalTotal: finalTotalOnce,
+          remainingBalance: remainingWithInterest,
+          // Kunlik bo'lib to'lash uchun qo'shimcha ma'lumotlar
+          ...((transactionData as any).termUnit === 'DAYS' ? {
+            days: (transactionData as any).days || 0,
+            months: 0 // Kunlik bo'lib to'lashda oylar 0
+          } : {
+            months: (transactionData as any).months || 0,
+            days: 0 // Oylik bo'lib to'lashda kunlar 0
+          }),
+          items: {
+            create: items.map(item => ({
+              productId: item.productId,
+              quantity: item.quantity,
+              price: item.price,
+              sellingPrice: item.sellingPrice || item.price, // Use selling price if provided, otherwise use price
+              originalPrice: item.originalPrice || item.price, // Use original price if provided, otherwise use price
+              total: item.total || (item.price * item.quantity), // Use provided total or calculate
+              creditMonth: item.creditMonth,
+              creditPercent: item.creditPercent,
+              monthlyPayment: item.monthlyPayment || null
+            }))
           }
         },
-        paymentSchedules: {
-          orderBy: { month: 'asc' }
-        }
-      }
-    });
-  }
+        include: {
+          items: true,
+          customer: true,
+          user: true,
+          soldBy: true,
+        },
+      });
+      // Create delivery task if applicable
+      const shouldCreateTask = Boolean(
+        (transactionData as any)?.deliveryUserId && (
+          String((transactionData as any)?.deliveryType).toUpperCase() === 'DELIVERY' ||
+          !!(transactionData as any)?.deliveryAddress
+        )
+      );
+      // Debug log
+      try {
+        console.log('[TransactionService] Task check:', {
+          transactionId: transaction.id,
+          deliveryUserId: (transactionData as any)?.deliveryUserId,
+          deliveryType: (transactionData as any)?.deliveryType,
+          deliveryAddress: (transactionData as any)?.deliveryAddress,
+          shouldCreateTask
+        });
+      } catch {}
 
-  async remove(id: number, currentUser?: any) {
-    // Validate that id is provided and is a valid number
-    if (id === undefined || id === null || isNaN(id) || id <= 0) {
-      throw new BadRequestException('Invalid transaction ID provided');
-    }
-
-    const transaction = await this.findOne(id);
-    
-    if (transaction.status === TransactionStatus.COMPLETED) {
-      // Faqat ADMIN foydalanuvchiga ruxsat beramiz
-      const role = currentUser?.role || currentUser?.userRole;
-      if (role !== 'ADMIN') {
-        throw new BadRequestException('Completed transactions cannot be deleted');
-      }
-    }
-
-    // Hammasini bitta tranzaksiyada bajarish: miqdorlarni qaytarish, bog'liq yozuvlarni o'chirish, so'ng tranzaksiyani o'chirish
-    return await this.prisma.$transaction(async (tx) => {
-      // Mahsulot miqdorlarini qaytarish
-      for (const item of transaction.items) {
-        if (item.productId) {
-          await tx.product.update({
-            where: { id: item.productId },
-            data: {
-              quantity: { increment: item.quantity },
-              status: 'IN_STORE'
-            }
+      if (shouldCreateTask) {
+        try {
+          // avoid duplicates if any
+          const existing = await (tx as any).task.findFirst({
+            where: { transactionId: transaction.id }
           });
+          if (!existing) {
+            await (tx as any).task.create({
+              data: {
+                transactionId: transaction.id,
+                auditorId: Number((transactionData as any).deliveryUserId),
+                status: 'PENDING' as any,
+              }
+            });
+            try { console.log('[TransactionService] Task created for transaction', transaction.id); } catch {}
+          } else {
+            try { console.log('[TransactionService] Task already exists for transaction', transaction.id); } catch {}
+          }
+        } catch (e) {
+          try { console.error('[TransactionService] Task creation error:', e?.message || e); } catch {}
         }
       }
-
-      // Bog'liq to'lov yozuvlarini o'chirish (agar mavjud bo'lsa)
-      // Baʼzi installlarda jadvallar nomi boshqacha bo‘lishi mumkin; mavjud bo‘lsa o‘chadi
-      try { await tx.creditRepayment.deleteMany({ where: { transactionId: id } }); } catch {}
-      try { await tx.dailyRepayment.deleteMany({ where: { transactionId: id } }); } catch {}
-
-      // Bog'liq payment schedule va itemlarni o'chirish
-      await tx.paymentSchedule.deleteMany({ where: { transactionId: id } });
-      await tx.transactionItem.deleteMany({ where: { transactionId: id } });
-
-      // Oxirida tranzaksiyani o'chirish
-      return tx.transaction.delete({ where: { id } });
+      return transaction;
     });
+
+    return createdTransaction;
   }
 
   // Qarzdorliklar ro'yxati (kredit / bo'lib to'lash)
@@ -1038,6 +411,158 @@ const updatedTransaction = await this.prisma.transaction.update({
     return { products, daily, totals };
   }
 
+  async findOne(id: number) {
+    const tx = await this.prisma.transaction.findUnique({
+      where: { id },
+      include: {
+        customer: true,
+        items: { include: { product: true } },
+        user: true,
+        soldBy: true,
+        fromBranch: true,
+        toBranch: true,
+        paymentSchedules: true
+      }
+    });
+    if (!tx) throw new NotFoundException('Transaction not found');
+    return tx;
+  }
+
+  async findAll(query: any) {
+    const {
+      startDate,
+      endDate,
+      branchId,
+      type,
+      limit
+    } = query || {};
+
+    const where: any = {};
+    if (type) where.type = type as any;
+    if (branchId) where.OR = [{ fromBranchId: Number(branchId) }, { toBranchId: Number(branchId) }];
+    if (startDate || endDate) {
+      where.createdAt = {};
+      if (startDate) where.createdAt.gte = new Date(startDate);
+      if (endDate) where.createdAt.lte = new Date(endDate);
+    }
+
+    const take = limit === 'all' ? undefined : (Number(limit) || 50);
+
+    const transactions = await this.prisma.transaction.findMany({
+      where,
+      include: {
+        customer: true,
+        items: { include: { product: true } },
+        user: true,
+        soldBy: true,
+        fromBranch: true,
+        toBranch: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      ...(take ? { take } : {})
+    });
+    return { transactions };
+  }
+
+  async findByType(type: string) {
+    const isDeliveryType = type === 'DELIVERY';
+    return this.prisma.transaction.findMany({
+      where: isDeliveryType
+        ? {
+            OR: [
+              { type: 'DELIVERY' as any },
+              {
+                AND: [
+                  { type: 'SALE' as any },
+                  {
+                    OR: [
+                      { deliveryType: 'DELIVERY' },
+                      { deliveryAddress: { not: null } }
+                    ]
+                  }
+                ]
+              }
+            ],
+            status: { not: 'CANCELLED' as any }
+          }
+        : { type: type as any, status: { not: 'CANCELLED' as any } },
+      include: {
+        customer: true,
+        items: { include: { product: true } },
+        user: {
+          select: { id: true, firstName: true, lastName: true, phone: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  async updateStatus(id: number, status: string, userId?: number) {
+    return this.prisma.transaction.update({
+      where: { id },
+      data: { status: status as any, updatedById: userId || null }
+    });
+  }
+
+  async findByProductId(productId: number, month?: string) {
+    let start: Date | undefined;
+    let end: Date | undefined;
+    if (month) {
+      const [y, m] = month.split('-').map(Number);
+      if (y && m) {
+        start = new Date(y, m - 1, 1);
+        end = new Date(y, m, 0, 23, 59, 59);
+      }
+    }
+    const whereTx: any = { items: { some: { productId } } };
+    if (start || end) {
+      whereTx.createdAt = {};
+      if (start) whereTx.createdAt.gte = start;
+      if (end) whereTx.createdAt.lte = end;
+    }
+
+    const transactions = await this.prisma.transaction.findMany({
+      where: whereTx,
+      include: {
+        customer: true,
+        items: { include: { product: true } },
+        user: true,
+        soldBy: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    const statusCounts = transactions.reduce((acc: any, t) => {
+      acc[t.status] = (acc[t.status] || 0) + 1;
+      acc.total = (acc.total || 0) + 1;
+      return acc;
+    }, {});
+
+    const typeCounts = transactions.reduce((acc: any, t) => {
+      acc[t.type] = (acc[t.type] || 0) + 1;
+      return acc;
+    }, {});
+
+    return { transactions, statusCounts: { total: statusCounts.total || 0, ...statusCounts }, typeCounts };
+  }
+
+  async update(id: number, dto: UpdateTransactionDto) {
+    return this.prisma.transaction.update({
+      where: { id },
+      data: dto as any,
+      include: {
+        customer: true,
+        items: { include: { product: true } },
+        user: true,
+        soldBy: true
+      }
+    });
+  }
+
+  async remove(id: number, _user?: any) {
+    return this.prisma.transaction.delete({ where: { id } });
+  }
+
   // Kredit to'lovlarini boshqarish
   async getPaymentSchedules(transactionId: number) {
     // Validate that transactionId is provided and is a valid number
@@ -1047,6 +572,27 @@ const updatedTransaction = await this.prisma.transaction.update({
 
     const transaction = await this.findOne(transactionId);
     return transaction.paymentSchedules;
+  }
+
+  // Auditor uchun delivery tasklar
+  async getDeliveryTasksForUser(auditorId: number) {
+    const tasks = await (this.prisma as any).task.findMany({
+      where: { auditorId, status: { not: 'CANCELLED' as any } },
+      include: {
+        transaction: {
+          include: {
+            customer: true,
+            items: { include: { product: true } },
+            user: { select: { id: true, firstName: true, lastName: true } },
+            soldBy: { select: { id: true, firstName: true, lastName: true } },
+            fromBranch: true,
+            toBranch: true
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    return tasks;
   }
 
   async updatePaymentStatus(transactionId: number, month: number, paid: boolean) {
@@ -1164,7 +710,6 @@ const updatedTransaction = await this.prisma.transaction.update({
       },
       orderBy: { createdAt: 'desc' }
     });
-    tx = await this.hydrateMissingProducts(tx);
     return tx;
   }
 
@@ -1196,7 +741,6 @@ const updatedTransaction = await this.prisma.transaction.update({
       },
       orderBy: { createdAt: 'desc' }
     });
-    tx = await this.hydrateMissingProducts(tx);
     return tx;
   }
 

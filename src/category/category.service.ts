@@ -10,10 +10,10 @@ export class CategoryService {
   async create(createCategoryDto: CreateCategoryDto) {
     return this.prisma.category.create({
       data: {
-        ...createCategoryDto,
+        ...(createCategoryDto as any),
         createdAt: new Date(),
         updatedAt: new Date(),
-        branchId:Number(createCategoryDto.branchId)
+        branchId: Number(createCategoryDto.branchId),
       },
     });
   }
@@ -36,7 +36,7 @@ export class CategoryService {
   async update(id: number, updateCategoryDto: UpdateCategoryDto) {
     return this.prisma.category.update({
       where: { id },
-      data: { ...updateCategoryDto, updatedAt: new Date(),branchId:Number(updateCategoryDto.branchId) },
+      data: { ...(updateCategoryDto as any), updatedAt: new Date(), branchId: Number(updateCategoryDto.branchId) },
     });
   }
 

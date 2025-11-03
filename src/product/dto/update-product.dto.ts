@@ -3,14 +3,6 @@ import { ApiProperty } from '@nestjs/swagger';
 import { IsString, IsNumber, IsOptional, IsEnum } from 'class-validator';
 import { ProductStatus } from '@prisma/client';
 
-export enum ProductSizeType {
-  NONE = 'NONE',
-  AREA_SQM = 'AREA_SQM',
-  CLOTHING_ALPHA = 'CLOTHING_ALPHA',
-  CLOTHING_NUMERIC = 'CLOTHING_NUMERIC',
-  FREE_TEXT = 'FREE_TEXT',
-}
-
 export class UpdateProductDto {
   @ApiProperty({ required: false })
   @IsString()
@@ -66,21 +58,6 @@ export class UpdateProductDto {
   @IsNumber()
   @IsOptional()
   bonusPercentage?: number;
-
-  @ApiProperty({ required: false, enum: ProductSizeType })
-  @IsEnum(ProductSizeType)
-  @IsOptional()
-  sizeType?: ProductSizeType;
-
-  @ApiProperty({ required: false })
-  @IsString()
-  @IsOptional()
-  sizeLabel?: string;
-
-  @ApiProperty({ required: false })
-  @IsNumber()
-  @IsOptional()
-  sizeNumber?: number;
 
   @ApiProperty({ required: false })
   @IsNumber()

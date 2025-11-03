@@ -2,6 +2,21 @@ generator client {
   provider = "prisma-client-js"
 }
 
+model Task {
+  id            Int        @id @default(autoincrement())
+  transactionId Int
+  auditorId     Int
+  status        TaskStatus @default(PENDING)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  auditor     User        @relation(fields: [auditorId], references: [id], onDelete: Cascade)
+
+  @@index([auditorId])
+  @@index([transactionId])
+}
+
 // ===== Attendance Tracking =====
 enum AttendanceEventType {
   CHECK_IN
@@ -83,6 +98,13 @@ enum TransactionStatus {
   CANCELLED
 }
 
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
 enum PaymentType {
   CASH
   CARD
@@ -125,13 +147,10 @@ enum ProductStatus {
   EXCHANGED
 }
 
-// Product size typing for different product kinds (carpet, clothing, motorcycle)
-enum ProductSizeType {
-  NONE
+// Category measurement type (piece-based vs area-based)
+enum CategoryType {
+  PIECE
   AREA_SQM
-  CLOTHING_ALPHA
-  CLOTHING_NUMERIC
-  FREE_TEXT
 }
 
 model Branch {
@@ -199,6 +218,8 @@ model User {
   attendanceEvents    AttendanceEvent[]
   faceTemplates       FaceTemplate[]
   Transaction         Transaction[]
+  deliveredTransactions Transaction[]        @relation("TransactionsDeliveryBy")
+  tasksAssigned        Task[]
 
   @@index([phone])
   @@index([branchId])
@@ -248,6 +269,7 @@ model Category {
   branchId    Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+  type        CategoryType @default(PIECE)
 
   branch   Branch?   @relation(fields: [branchId], references: [id], onDelete: Cascade)
   products Product[]
@@ -276,10 +298,6 @@ model Product {
   deletedAt         DateTime?
   createdAt         DateTime?                 @default(now())
   updatedAt         DateTime?                 @updatedAt
-  // Size fields
-  sizeType          ProductSizeType           @default(NONE)
-  sizeLabel         String?                   @db.VarChar(100) // e.g., XL, 52, 2x3
-  sizeNumber        Float? // numeric size when applicable (e.g., 52 -> 52)
   areaSqm           Float? // carpet area in square meters
   branch            Branch                    @relation(fields: [branchId], references: [id], onDelete: Cascade)
   category          Category                  @relation(fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
@@ -360,6 +378,7 @@ model Transaction {
   receiptId             String?
   description           String?
   updatedById           Int?
+  deliveryUserId        Int?
   // Credit repayment tracking fields
   creditRepaymentAmount Float?            @default(0)
   lastRepaymentDate     DateTime?
@@ -378,6 +397,7 @@ model Transaction {
   fromBranch       Branch?                   @relation("FromBranch", fields: [fromBranchId], references: [id], onDelete: Cascade)
   toBranch         Branch?                   @relation("ToBranch", fields: [toBranchId], references: [id], onDelete: Cascade)
   updatedBy        User?                     @relation(fields: [updatedById], references: [id])
+  deliveryUser     User?                     @relation("TransactionsDeliveryBy", fields: [deliveryUserId], references: [id])
   items            TransactionItem[]
   paymentSchedules PaymentSchedule[]
   PaymentRepayment PaymentRepayment[]
@@ -385,6 +405,7 @@ model Transaction {
   creditRepayments CreditRepayment[]
   bonusProducts    TransactionBonusProduct[]
   bonuses          Bonus[]
+  tasks            Task[]
 
   @@index([customerId])
   @@index([userId])
@@ -395,6 +416,7 @@ model Transaction {
   @@index([transactionType])
   @@index([status])
   @@index([createdAt])
+  @@index([deliveryUserId])
 }
 
 model TransactionItem {

@@ -42,6 +42,12 @@ export class TransactionController {
     return this.transactionService.findByType('DELIVERY');
   }
 
+  @Get('tasks/delivery')
+  async findDeliveryTasks(@Query('auditorId') auditorId: string, @CurrentUser() user: any) {
+    const id = auditorId ? parseInt(auditorId) : user.id;
+    return this.transactionService.getDeliveryTasksForUser(id);
+  }
+
   @Patch(':id/status')
   async updateStatus(
     @Param('id') id: string,

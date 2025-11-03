@@ -1,14 +1,6 @@
 import { IsString, IsNumber, IsOptional, IsEnum, Min } from 'class-validator';
 import { ProductStatus } from '@prisma/client';
 
-export enum ProductSizeType {
-  NONE = 'NONE',
-  AREA_SQM = 'AREA_SQM',
-  CLOTHING_ALPHA = 'CLOTHING_ALPHA',
-  CLOTHING_NUMERIC = 'CLOTHING_NUMERIC',
-  FREE_TEXT = 'FREE_TEXT',
-}
-
 export class CreateProductDto {
   @IsString()
   name: string;
@@ -52,18 +44,6 @@ export class CreateProductDto {
   @Min(0)
   @IsOptional()
   bonusPercentage?: number;
-
-  @IsEnum(ProductSizeType)
-  @IsOptional()
-  sizeType?: ProductSizeType;
-
-  @IsString()
-  @IsOptional()
-  sizeLabel?: string;
-
-  @IsNumber()
-  @IsOptional()
-  sizeNumber?: number;
 
   @IsNumber()
   @IsOptional()
