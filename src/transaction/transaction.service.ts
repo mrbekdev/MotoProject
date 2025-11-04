@@ -146,6 +146,99 @@ export class TransactionService {
           soldBy: true,
         },
       });
+
+      // Decrement inventory for SALE transactions immediately
+      if ((transactionData as any)?.type === 'SALE') {
+        for (const it of items) {
+          if (!it.productId) continue;
+          const prod = await tx.product.findUnique({ where: { id: it.productId } });
+          if (!prod) {
+            throw new BadRequestException(`Product not found: ${it.productId}`);
+          }
+          // Optional check: fromBranchId consistency; if provided and mismatched, proceed but do not block
+          if ((transactionData as any)?.fromBranchId && prod.branchId !== (transactionData as any).fromBranchId) {
+            try { console.warn(`[TransactionService] Sale fromBranchId ${ (transactionData as any).fromBranchId } differs from product.branchId ${prod.branchId} for product ${prod.id}`); } catch {}
+          }
+
+          const soldQtyRaw = Number(it.quantity) || 0;
+          const hasArea = prod.areaSqm != null;
+
+          if (hasArea && !Number.isInteger(soldQtyRaw)) {
+            const currentArea = Math.max(0, Number(prod.areaSqm) || 0);
+            const soldArea = Math.max(0, soldQtyRaw);
+            if (soldArea > currentArea) {
+              throw new BadRequestException(`Insufficient area for product ${prod.name || prod.id}. Available: ${currentArea} m², requested: ${soldArea} m²`);
+            }
+            const newArea = Number((currentArea - soldArea).toFixed(4));
+            await tx.product.update({
+              where: { id: prod.id },
+              data: {
+                areaSqm: newArea,
+                status: newArea === 0 ? ('SOLD' as any) : ('IN_STORE' as any),
+              },
+            });
+          } else {
+            const soldQty = Math.max(0, Math.floor(soldQtyRaw));
+            const currentQty = Math.max(0, Number(prod.quantity) || 0);
+            if (soldQty > currentQty) {
+              throw new BadRequestException(`Insufficient stock for product ${prod.name || prod.id}. Available: ${currentQty}, requested: ${soldQty}`);
+            }
+            const newQty = currentQty - soldQty;
+            await tx.product.update({
+              where: { id: prod.id },
+              data: {
+                quantity: newQty,
+                status: newQty === 0 ? ('SOLD' as any) : ('IN_STORE' as any),
+              },
+            });
+          }
+        }
+      }
+      // Increment inventory for PURCHASE transactions
+      else if ((transactionData as any)?.type === 'PURCHASE') {
+        // Try to resolve branch type for status decision
+        let branchType: string | null = null;
+        try {
+          const b = (transactionData as any)?.fromBranchId
+            ? await tx.branch.findUnique({ where: { id: Number((transactionData as any).fromBranchId) }, select: { type: true } })
+            : null;
+          branchType = (b?.type as any) || null;
+        } catch {}
+
+        for (const it of items) {
+          if (!it.productId) continue;
+          const prod = await tx.product.findUnique({ where: { id: it.productId } });
+          if (!prod) {
+            throw new BadRequestException(`Product not found: ${it.productId}`);
+          }
+          const addRaw = Number(it.quantity) || 0;
+          const hasArea = prod.areaSqm != null;
+
+          if (hasArea && !Number.isInteger(addRaw)) {
+            const currentArea = Math.max(0, Number(prod.areaSqm) || 0);
+            const addedArea = Math.max(0, addRaw);
+            const newArea = Number((currentArea + addedArea).toFixed(4));
+            await tx.product.update({
+              where: { id: prod.id },
+              data: {
+                areaSqm: newArea,
+                status: branchType === 'SKLAD' ? ('IN_WAREHOUSE' as any) : ('IN_STORE' as any)
+              }
+            });
+          } else {
+            const addQty = Math.max(0, Math.floor(addRaw));
+            const currentQty = Math.max(0, Number(prod.quantity) || 0);
+            const newQty = currentQty + addQty;
+            await tx.product.update({
+              where: { id: prod.id },
+              data: {
+                quantity: newQty,
+                status: branchType === 'SKLAD' ? ('IN_WAREHOUSE' as any) : ('IN_STORE' as any)
+              }
+            });
+          }
+        }
+      }
       // Create delivery task if applicable
       const shouldCreateTask = Boolean(
         (transactionData as any)?.deliveryUserId && (
