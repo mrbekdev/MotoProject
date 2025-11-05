@@ -1678,6 +1678,30 @@ export class TransactionService {
           console.error(' Penalty bonus yaratishda xatolik:', e);
         }
       }
+      // Agar umumiy natija manfiy bo'lmasa ham, ayrim mahsulotlar kelishdan past sotilgan bo'lsa, ularning jami zarari uchun jarima yozuvi yaratiladi
+      else {
+        const totalPerItemLoss = negativeItems.reduce((sum, n) => sum + (n.lossAmount || 0), 0);
+        if (totalPerItemLoss > 0) {
+          try {
+            const penaltyData = {
+              userId: soldByUserId,
+              branchId: branchContextId || undefined,
+              amount: -Math.round(totalPerItemLoss),
+              reason: 'SALES_PENALTY',
+              description: `Kelish narxidan past sotilgan mahsulotlar uchun jarima. Transaction ID: ${transaction.id}. Jami zarar: ${Math.round(totalPerItemLoss).toLocaleString()} som. Tafsilotlar: `
+                + negativeItems.map(n => `${n.item.productName || n.productInfo?.name} (${n.productInfo?.model || '-'}) qty=${n.quantity}, sotish=${n.sellingPrice}, kelish=${n.costInUzs}, zarar=${n.lossAmount}`).join(' | '),
+              bonusProducts: null,
+              transactionId: transaction.id,
+              bonusDate: new Date().toISOString()
+            } as any;
+            console.log(' PER-ITEM LOSS PENALTY yaratilmoqda:', penaltyData);
+            await this.bonusService.create(penaltyData, createdById || soldByUserId);
+            console.log(` PER-ITEM LOSS PENALTY YARATILDI: ${-Math.round(totalPerItemLoss)} som (manfiy)`);
+          } catch (e) {
+            console.error(' Per-item loss penalty yaratishda xatolik:', e);
+          }
+        }
+      }
     } catch (error) {
       console.error(' Bonus hisoblashda xatolik:', error);
       // Bonus yaratishda xatolik bo'lsa ham, asosiy tranzaksiya davom etsin
