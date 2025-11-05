@@ -2,10 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateTransactionBonusProductDto } from './dto/create-transaction-bonus-product.dto';
 import { UpdateTransactionBonusProductDto } from './dto/update-transaction-bonus-product.dto';
+import { TransactionService } from '../transaction/transaction.service';
 
 @Injectable()
 export class TransactionBonusProductService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService, private transactionService: TransactionService) {}
 
   private async getUsdToUzsRate(branchId?: number): Promise<number> {
     // Read latest active USD->UZS rate. If branchId-specific rate exists, prefer it; otherwise fallback to global
@@ -29,13 +30,16 @@ export class TransactionBonusProductService {
 
     const product = await this.prisma.product.findUnique({
       where: { id: productId },
+      include: { category: { select: { type: true } } },
     });
 
     if (!product) {
       throw new Error('Product not found');
     }
 
-    if (product.quantity < quantity) {
+    const isArea = (product as any)?.category?.type === 'AREA_SQM' || product?.areaSqm != null;
+    const available = isArea ? Number(product?.areaSqm || 0) : Number(product?.quantity || 0);
+    if (available < quantity) {
       throw new Error('Insufficient product quantity');
     }
 
@@ -54,16 +58,29 @@ export class TransactionBonusProductService {
         },
       });
 
-      // Deduct quantity from product inventory
-      await prisma.product.update({
-        where: { id: productId },
-        data: {
-          quantity: {
-            decrement: quantity,
+      // Deduct from inventory (areaSqm for AREA_SQM, quantity otherwise)
+      if (isArea) {
+        const currentArea = Number(product?.areaSqm || 0);
+        const newArea = Math.max(0, Number((currentArea - quantity).toFixed(4)));
+        await prisma.product.update({
+          where: { id: productId },
+          data: { areaSqm: newArea }
+        });
+      } else {
+        await prisma.product.update({
+          where: { id: productId },
+          data: {
+            quantity: { decrement: quantity },
           },
-        },
-      });
+        });
+      }
 
+      // Recalculate bonuses now that bonus products are recorded
+      try {
+        await this.transactionService.recalculateBonusesForTransaction(transactionId);
+      } catch (e) {
+        try { console.warn('Bonus recalc after single bonus product failed:', (e as any)?.message || e); } catch {}
+      }
       return bonusProduct;
     });
   }
@@ -76,6 +93,7 @@ export class TransactionBonusProductService {
         // Check if product exists and has enough quantity
         const product = await prisma.product.findUnique({
           where: { id: bonusProduct.productId },
+          include: { category: { select: { type: true } } },
         });
 
         if (!product) {
@@ -83,7 +101,9 @@ export class TransactionBonusProductService {
           throw new Error(`Product with ID ${bonusProduct.productId} not found`);
         }
 
-        if (product.quantity < bonusProduct.quantity) {
+        const isArea = (product as any)?.category?.type === 'AREA_SQM' || product?.areaSqm != null;
+        const available = isArea ? Number(product?.areaSqm || 0) : Number(product?.quantity || 0);
+        if (available < bonusProduct.quantity) {
           console.error(`❌ Service: Insufficient quantity for product ${product.name}. Available: ${product.quantity}, Requested: ${bonusProduct.quantity}`);
           throw new Error(`Insufficient quantity for product ${product.name}`);
         }
@@ -117,23 +137,39 @@ export class TransactionBonusProductService {
           productName: createdBonusProduct.product.name
         });
 
-        // Deduct quantity from product inventory
-        const updatedProduct = await prisma.product.update({
-          where: { id: bonusProduct.productId },
-          data: {
-            quantity: {
-              decrement: bonusProduct.quantity,
+        // Deduct from inventory
+        if (isArea) {
+          const currentArea = Number(product?.areaSqm || 0);
+          const newArea = Math.max(0, Number((currentArea - bonusProduct.quantity).toFixed(4)));
+          const updatedProduct = await prisma.product.update({
+            where: { id: bonusProduct.productId },
+            data: { areaSqm: newArea },
+            select: { id: true, name: true, areaSqm: true }
+          });
+          console.log(`📉 Service: Updated product area - ${updatedProduct.name}: ${(currentArea).toFixed(2)} → ${(newArea).toFixed(2)} m²`);
+        } else {
+          const updatedProduct = await prisma.product.update({
+            where: { id: bonusProduct.productId },
+            data: {
+              quantity: {
+                decrement: bonusProduct.quantity,
+              },
             },
-          },
-          select: { id: true, name: true, quantity: true }
-        });
-
-        console.log(`📉 Service: Updated product inventory - ${updatedProduct.name}: ${updatedProduct.quantity + bonusProduct.quantity} → ${updatedProduct.quantity}`);
+            select: { id: true, name: true, quantity: true }
+          });
+          console.log(`📉 Service: Updated product inventory - ${updatedProduct.name}: ${updatedProduct.quantity + bonusProduct.quantity} → ${updatedProduct.quantity}`);
+        }
 
         createdBonusProducts.push(createdBonusProduct);
       }
 
       console.log(`🎉 Service: Successfully created ${createdBonusProducts.length} bonus products for transaction ${transactionId}`);
+      // Trigger bonus recalculation once for the transaction
+      try {
+        await this.transactionService.recalculateBonusesForTransaction(transactionId);
+      } catch (e) {
+        try { console.warn('Bonus recalc after multiple bonus products failed:', (e as any)?.message || e); } catch {}
+      }
       return createdBonusProducts;
     });
   }

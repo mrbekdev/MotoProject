@@ -650,7 +650,7 @@ model TransactionBonusProduct {
   id            Int      @id @default(autoincrement())
   transactionId Int
   productId     Int
-  quantity      Int
+  quantity      Float
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

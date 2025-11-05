@@ -9,5 +9,6 @@ import { BonusModule } from '../bonus/bonus.module';
   imports: [CurrencyExchangeRateModule, BonusModule],
   controllers: [TransactionController],
   providers: [TransactionService, PrismaService],
+  exports: [TransactionService],
 })
 export class TransactionModule {}
