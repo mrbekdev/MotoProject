@@ -151,7 +151,10 @@ export class TransactionService {
       if ((transactionData as any)?.type === 'SALE') {
         for (const it of items) {
           if (!it.productId) continue;
-          const prod = await tx.product.findUnique({ where: { id: it.productId } });
+          const prod = await tx.product.findUnique({
+            where: { id: it.productId },
+            include: { category: { select: { type: true } } }
+          });
           if (!prod) {
             throw new BadRequestException(`Product not found: ${it.productId}`);
           }
@@ -161,10 +164,10 @@ export class TransactionService {
           }
 
           const soldQtyRaw = Number(it.quantity) || 0;
-          const hasArea = prod.areaSqm != null;
+          const hasArea = (prod as any).category?.type === 'AREA_SQM';
 
-          if (hasArea && !Number.isInteger(soldQtyRaw)) {
-            const currentArea = Math.max(0, Number(prod.areaSqm) || 0);
+          if (hasArea) {
+            const currentArea = Math.max(0, Number(prod.areaSqm ?? 0) || 0);
             const soldArea = Math.max(0, soldQtyRaw);
             if (soldArea > currentArea) {
               throw new BadRequestException(`Insufficient area for product ${prod.name || prod.id}. Available: ${currentArea} m², requested: ${soldArea} m²`);
@@ -207,15 +210,18 @@ export class TransactionService {
 
         for (const it of items) {
           if (!it.productId) continue;
-          const prod = await tx.product.findUnique({ where: { id: it.productId } });
+          const prod = await tx.product.findUnique({
+            where: { id: it.productId },
+            include: { category: { select: { type: true } } }
+          });
           if (!prod) {
             throw new BadRequestException(`Product not found: ${it.productId}`);
           }
           const addRaw = Number(it.quantity) || 0;
-          const hasArea = prod.areaSqm != null;
+          const hasArea = (prod as any).category?.type === 'AREA_SQM';
 
-          if (hasArea && !Number.isInteger(addRaw)) {
-            const currentArea = Math.max(0, Number(prod.areaSqm) || 0);
+          if (hasArea) {
+            const currentArea = Math.max(0, Number(prod.areaSqm ?? 0) || 0);
             const addedArea = Math.max(0, addRaw);
             const newArea = Number((currentArea + addedArea).toFixed(4));
             await tx.product.update({
