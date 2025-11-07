@@ -20,6 +20,7 @@ import { BonusModule } from './bonus/bonus.module';
 import { TransactionBonusProductModule } from './transaction-bonus-product/transaction-bonus-product.module';
 import { WorkScheduleModule } from './work-schedule/work-schedule.module';
 import { AttendanceModule } from './attendance/attendance.module';
+import { IntStoreModule } from './int-store/int-store.module';
 import { UserBranchAccessModule } from './user-branch-access/user-branch-access.module';
 
 
@@ -43,7 +44,8 @@ import { UserBranchAccessModule } from './user-branch-access/user-branch-access.
     TransactionBonusProductModule, 
     WorkScheduleModule, 
     AttendanceModule,
-    UserBranchAccessModule
+    UserBranchAccessModule,
+    IntStoreModule
   ],
   controllers: [AppController],
   providers: [AppService],

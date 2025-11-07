@@ -48,6 +48,19 @@ export class TransactionController {
     return this.transactionService.getDeliveryTasksForUser(id);
   }
 
+  @Get('tasks/delivery/stats')
+  async getDeliveryTaskStats(
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.transactionService.getDeliveryTaskStats(
+      startDate ? new Date(startDate) : undefined,
+      endDate ? new Date(endDate) : undefined,
+      branchId ? Number(branchId) : undefined,
+    );
+  }
+
   @Patch(':id/status')
   async updateStatus(
     @Param('id') id: string,
@@ -55,6 +68,26 @@ export class TransactionController {
     @CurrentUser() user: any
   ) {
     return this.transactionService.updateStatus(parseInt(id), body.status, user.id);
+  }
+
+  // PUT alias for clients using PUT instead of PATCH
+  @Put(':id/status')
+  async updateStatusPut(
+    @Param('id') id: string,
+    @Body() body: { status: string },
+    @CurrentUser() user: any
+  ) {
+    return this.transactionService.updateStatus(parseInt(id), body.status, user.id);
+  }
+
+  @Put('tasks/:taskId/status')
+  async updateTaskStatus(
+    @Param('taskId') taskId: string,
+    @Body() body: { status: string; auditorId?: number },
+    @CurrentUser() user: any
+  ) {
+    const actorId = user?.id ?? (body?.auditorId != null ? Number(body.auditorId) : undefined);
+    return this.transactionService.updateTaskStatus(parseInt(taskId), body.status, actorId);
   }
 
   @Get('product/:productId')

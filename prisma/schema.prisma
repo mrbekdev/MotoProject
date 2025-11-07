@@ -5,13 +5,13 @@ generator client {
 model Task {
   id            Int        @id @default(autoincrement())
   transactionId Int
-  auditorId     Int
+  auditorId     Int?
   status        TaskStatus @default(PENDING)
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
-  auditor     User        @relation(fields: [auditorId], references: [id], onDelete: Cascade)
+  auditor     User?       @relation(fields: [auditorId], references: [id], onDelete: Cascade)
 
   @@index([auditorId])
   @@index([transactionId])
@@ -693,4 +693,10 @@ model FaceTemplate {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// Simple model to store a single integer value
+model IntStore {
+  id    Int  @id @default(autoincrement())
+  value Int
 }

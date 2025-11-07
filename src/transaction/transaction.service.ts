@@ -245,12 +245,10 @@ export class TransactionService {
           }
         }
       }
-      // Create delivery task if applicable
-      const shouldCreateTask = Boolean(
-        (transactionData as any)?.deliveryUserId && (
-          String((transactionData as any)?.deliveryType).toUpperCase() === 'DELIVERY' ||
-          !!(transactionData as any)?.deliveryAddress
-        )
+      // Create delivery task if applicable (even if no specific auditor yet)
+      const hasDelivery = Boolean(
+        String((transactionData as any)?.deliveryType).toUpperCase() === 'DELIVERY' ||
+        !!(transactionData as any)?.deliveryAddress
       );
       // Debug log
       try {
@@ -258,12 +256,11 @@ export class TransactionService {
           transactionId: transaction.id,
           deliveryUserId: (transactionData as any)?.deliveryUserId,
           deliveryType: (transactionData as any)?.deliveryType,
-          deliveryAddress: (transactionData as any)?.deliveryAddress,
-          shouldCreateTask
+          deliveryAddress: (transactionData as any)?.deliveryAddress
         });
       } catch {}
 
-      if (shouldCreateTask) {
+      if (hasDelivery) {
         try {
           // avoid duplicates if any
           const existing = await (tx as any).task.findFirst({
@@ -273,7 +270,7 @@ export class TransactionService {
             await (tx as any).task.create({
               data: {
                 transactionId: transaction.id,
-                auditorId: Number((transactionData as any).deliveryUserId),
+                auditorId: (transactionData as any)?.deliveryUserId ? Number((transactionData as any).deliveryUserId) : null,
                 status: 'PENDING' as any,
               }
             });
@@ -660,10 +657,31 @@ export class TransactionService {
   }
 
   async updateStatus(id: number, status: string, userId?: number) {
-    return this.prisma.transaction.update({
+    // First, update the transaction status (and assign deliveryUserId on accept)
+    const data: any = { status: status as any, updatedById: userId || null };
+    if (status === 'IN_PROGRESS' && userId) {
+      data.deliveryUserId = userId;
+    }
+    const tx = await this.prisma.transaction.update({
       where: { id },
-      data: { status: status as any, updatedById: userId || null }
+      data
     });
+
+    // Then, sync the delivery task if exists
+    try {
+      const task = await (this.prisma as any).task.findFirst({ where: { transactionId: id } });
+      if (task) {
+        const taskUpdate: any = { status: status as any };
+        if (status === 'IN_PROGRESS' && userId && !task.auditorId) {
+          taskUpdate.auditorId = userId;
+        }
+        await (this.prisma as any).task.update({ where: { id: task.id }, data: taskUpdate });
+      }
+    } catch (e) {
+      try { console.warn('[TransactionService] Failed to sync task status:', (e as any)?.message || e); } catch {}
+    }
+
+    return tx;
   }
 
   async findByProductId(productId: number, month?: string) {
@@ -739,7 +757,13 @@ export class TransactionService {
   // Auditor uchun delivery tasklar
   async getDeliveryTasksForUser(auditorId: number) {
     const tasks = await (this.prisma as any).task.findMany({
-      where: { auditorId, status: { not: 'CANCELLED' as any } },
+      where: {
+        status: { not: 'CANCELLED' as any },
+        OR: [
+          { auditorId: auditorId },       // assigned to me
+          { auditorId: null }             // unassigned / free tasks
+        ]
+      },
       include: {
         transaction: {
           include: {
@@ -755,6 +779,98 @@ export class TransactionService {
       orderBy: { createdAt: 'desc' }
     });
     return tasks;
+  }
+
+  // Auditor delivery stats for admin reports
+  async getDeliveryTaskStats(startDate?: Date, endDate?: Date, branchId?: number) {
+    const where: any = {
+      status: { not: 'CANCELLED' as any },
+    };
+    if (startDate || endDate) {
+      where.createdAt = {};
+      if (startDate) where.createdAt.gte = startDate;
+      if (endDate) where.createdAt.lte = endDate;
+    }
+    if (branchId) {
+      where.transaction = {
+        OR: [
+          { fromBranchId: Number(branchId) },
+          { toBranchId: Number(branchId) }
+        ]
+      } as any;
+    }
+
+    const tasks = await (this.prisma as any).task.findMany({
+      where,
+      include: {
+        auditor: { select: { id: true, firstName: true, lastName: true, username: true } },
+        transaction: { select: { fromBranchId: true, toBranchId: true, finalTotal: true, total: true } }
+      }
+    });
+
+    const byAuditor: Record<string, any> = {};
+    for (const t of tasks) {
+      const aid = t.auditor?.id ? String(t.auditor.id) : 'UNASSIGNED';
+      if (!byAuditor[aid]) {
+        byAuditor[aid] = {
+          auditorId: t.auditor?.id || null,
+          auditorName: t.auditor ? `${t.auditor.firstName || ''} ${t.auditor.lastName || ''}`.trim() || t.auditor.username || `#${t.auditor.id}` : '—',
+          pending: 0,
+          in_progress: 0,
+          completed: 0,
+          total: 0,
+          // amount aggregates
+          in_progressAmount: 0,
+          completedAmount: 0,
+          totalAmount: 0,
+        };
+      }
+      const bucket = byAuditor[aid];
+      const s = String(t.status || '').toUpperCase();
+      const amt = Number(t.transaction?.finalTotal ?? t.transaction?.total ?? 0) || 0;
+      if (s === 'PENDING') bucket.pending += 1;
+      else if (s === 'IN_PROGRESS') { bucket.in_progress += 1; bucket.in_progressAmount += amt; }
+      else if (s === 'COMPLETED') { bucket.completed += 1; bucket.completedAmount += amt; }
+      bucket.total += 1;
+      bucket.totalAmount += amt;
+    }
+    const list = Object.values(byAuditor);
+    return { stats: list } as any;
+  }
+
+  async updateTaskStatus(taskId: number, status: string, userId?: number) {
+    if (!taskId || isNaN(Number(taskId))) {
+      throw new BadRequestException('Invalid task ID');
+    }
+    // Update task first
+    const task = await (this.prisma as any).task.findUnique({ where: { id: Number(taskId) } });
+    if (!task) throw new NotFoundException('Task not found');
+
+    const taskUpdate: any = { status: status as any };
+    if (status === 'IN_PROGRESS' && userId) {
+      // Force-assign to the acting user on accept
+      taskUpdate.auditorId = Number(userId);
+    }
+    if (status === 'COMPLETED' && userId && !task.auditorId) {
+      // If somehow was not assigned, backfill assignment to the actor
+      taskUpdate.auditorId = Number(userId);
+    }
+    const updatedTask = await (this.prisma as any).task.update({ where: { id: Number(taskId) }, data: taskUpdate });
+
+    // Sync related transaction
+    try {
+      const txId = Number(task.transactionId);
+      const txData: any = { status: status as any, updatedById: userId || null };
+      if (status === 'IN_PROGRESS' && userId) {
+        // Assign transaction to the same user on accept
+        txData.deliveryUserId = Number(userId);
+      }
+      await this.prisma.transaction.update({ where: { id: txId }, data: txData });
+    } catch (e) {
+      try { console.warn('[TransactionService] Failed to sync transaction from task:', (e as any)?.message || e); } catch {}
+    }
+
+    return updatedTask;
   }
 
   async updatePaymentStatus(transactionId: number, month: number, paid: boolean) {
@@ -1314,10 +1430,6 @@ export class TransactionService {
    */
   private async calculateAndCreateSalesBonuses(transaction: any, soldByUserId: number, createdById?: number) {
     try {
-      console.log(' BONUS CALCULATION STARTED');
-      console.log('Transaction ID:', transaction.id);
-      console.log('Sold by user ID:', soldByUserId);
-      console.log('Created by ID (cashier):', createdById);
 
       // Sotuvchining branch ma'lumotini olish
       const seller = await this.prisma.user.findUnique({
