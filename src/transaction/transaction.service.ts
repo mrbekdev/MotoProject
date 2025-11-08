@@ -5,6 +5,7 @@ import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { TransactionType, TransactionStatus, PaymentType } from '@prisma/client';
 import { CurrencyExchangeRateService } from '../currency-exchange-rate/currency-exchange-rate.service';
 import { BonusService } from '../bonus/bonus.service';
+import { DeliveryTasksGateway } from './delivery-tasks.gateway';
 
 @Injectable()
 export class TransactionService {
@@ -12,6 +13,7 @@ export class TransactionService {
     private prisma: PrismaService,
     private currencyExchangeRateService: CurrencyExchangeRateService,
     private bonusService: BonusService,
+    private deliveryGateway: DeliveryTasksGateway,
   ) {}
 
   async create(createTransactionDto: CreateTransactionDto, userId?: number) {
@@ -267,7 +269,7 @@ export class TransactionService {
             where: { transactionId: transaction.id }
           });
           if (!existing) {
-            await (tx as any).task.create({
+            const createdTask = await (tx as any).task.create({
               data: {
                 transactionId: transaction.id,
                 auditorId: (transactionData as any)?.deliveryUserId ? Number((transactionData as any).deliveryUserId) : null,
@@ -275,6 +277,7 @@ export class TransactionService {
               }
             });
             try { console.log('[TransactionService] Task created for transaction', transaction.id); } catch {}
+            try { this.deliveryGateway.emitTaskCreated({ id: createdTask.id, transactionId: transaction.id, status: createdTask.status, auditorId: createdTask.auditorId }); } catch {}
           } else {
             try { console.log('[TransactionService] Task already exists for transaction', transaction.id); } catch {}
           }
@@ -675,7 +678,8 @@ export class TransactionService {
         if (status === 'IN_PROGRESS' && userId && !task.auditorId) {
           taskUpdate.auditorId = userId;
         }
-        await (this.prisma as any).task.update({ where: { id: task.id }, data: taskUpdate });
+        const updatedTask = await (this.prisma as any).task.update({ where: { id: task.id }, data: taskUpdate });
+        try { this.deliveryGateway.emitTaskUpdated({ id: updatedTask.id, transactionId: id, status: updatedTask.status, auditorId: updatedTask.auditorId }); } catch {}
       }
     } catch (e) {
       try { console.warn('[TransactionService] Failed to sync task status:', (e as any)?.message || e); } catch {}
@@ -856,6 +860,7 @@ export class TransactionService {
       taskUpdate.auditorId = Number(userId);
     }
     const updatedTask = await (this.prisma as any).task.update({ where: { id: Number(taskId) }, data: taskUpdate });
+    try { this.deliveryGateway.emitTaskUpdated({ id: updatedTask.id, transactionId: updatedTask.transactionId, status: updatedTask.status, auditorId: updatedTask.auditorId }); } catch {}
 
     // Sync related transaction
     try {
