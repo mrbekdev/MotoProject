@@ -1,4 +1,4 @@
-import { IsString, IsOptional, MaxLength, IsEnum } from 'class-validator';
+import { IsString, IsOptional, MaxLength, IsEnum, IsBoolean } from 'class-validator';
 
 export enum BranchType {
   SKLAD = 'SKLAD',
@@ -22,4 +22,8 @@ export class CreateBranchDto {
   @IsString()
   @MaxLength(20)
   phoneNumber?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  customerInfoOptional?: boolean;
 }

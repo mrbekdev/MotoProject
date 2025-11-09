@@ -17,7 +17,15 @@ export class TransactionService {
   ) {}
 
   async create(createTransactionDto: CreateTransactionDto, userId?: number) {
-    const { items, customer, ...transactionData } = createTransactionDto;
+    const { items, customer, ...restDto } = createTransactionDto as any;
+    // Extract client-side helpers so they don't leak into Prisma create()
+    const immediatePayments: Array<{ channel: string; amount: number }> = (restDto as any).immediatePayments || (restDto as any).payments || [];
+    const {
+      cashierId,
+      immediatePayments: _omitImmediate,
+      payments: _omitPayments,
+      ...transactionData
+    } = restDto as any;
 
     // User role ni tekshirish - endi frontend da tanlanadi
     if (userId) {
@@ -105,49 +113,84 @@ export class TransactionService {
     const finalTotalOnce = upfrontPayment + remainingWithInterest;
 
     // Transaction yaratish
-    const { cashierId, ...cleanTransactionData } = transactionData as any;
     const createdTransaction = await this.prisma.$transaction(async (tx) => {
-      const transaction = await tx.transaction.create({
-        data: {
-          ...cleanTransactionData,
-          customerId,
-          userId: createdByUserId || null, // yaratgan foydalanuvchi
-          soldByUserId: soldByUserId || null, // sotgan kassir
-          upfrontPaymentType: (transactionData as any).upfrontPaymentType || 'CASH', // Default to CASH if not specified
-          termUnit: (transactionData as any).termUnit || 'MONTHS', // Default to MONTHS if not specified
-          // Ensure totals are consistent and interest is applied once at sale time
-          total: computedTotal,
-          finalTotal: finalTotalOnce,
-          remainingBalance: remainingWithInterest,
-          // Kunlik bo'lib to'lash uchun qo'shimcha ma'lumotlar
-          ...((transactionData as any).termUnit === 'DAYS' ? {
-            days: (transactionData as any).days || 0,
-            months: 0 // Kunlik bo'lib to'lashda oylar 0
-          } : {
-            months: (transactionData as any).months || 0,
-            days: 0 // Oylik bo'lib to'lashda kunlar 0
-          }),
-          items: {
-            create: items.map(item => ({
-              productId: item.productId,
-              quantity: item.quantity,
-              price: item.price,
-              sellingPrice: item.sellingPrice || item.price, // Use selling price if provided, otherwise use price
-              originalPrice: item.originalPrice || item.price, // Use original price if provided, otherwise use price
-              total: item.total || (item.price * item.quantity), // Use provided total or calculate
-              creditMonth: item.creditMonth,
-              creditPercent: item.creditPercent,
-              monthlyPayment: item.monthlyPayment || null
-            }))
-          }
+      // Build Prisma create data without leaking unknown args (e.g., immediatePayments)
+      const data: any = {
+        type: transactionData.type,
+        status: transactionData.status,
+        discount: transactionData.discount,
+        total: computedTotal,
+        finalTotal: finalTotalOnce,
+        paymentType: transactionData.paymentType,
+        upfrontPaymentType: (transactionData as any).upfrontPaymentType || 'CASH',
+        termUnit: (transactionData as any).termUnit || 'MONTHS',
+        deliveryMethod: transactionData.deliveryMethod,
+        deliveryType: transactionData.deliveryType,
+        deliveryAddress: transactionData.deliveryAddress,
+        amountPaid: transactionData.amountPaid,
+        downPayment: transactionData.downPayment,
+        remainingBalance: remainingWithInterest,
+        days: transactionData.days,
+        months: transactionData.months,
+        transactionType: transactionData.transactionType,
+        receiptId: transactionData.receiptId,
+        description: transactionData.description,
+        creditRepaymentAmount: transactionData.creditRepaymentAmount,
+        lastRepaymentDate: transactionData.lastRepaymentDate,
+        extraProfit: transactionData.extraProfit,
+        items: {
+          create: items.map((item: any) => ({
+            productId: item.productId,
+            quantity: item.quantity,
+            price: item.price,
+            sellingPrice: item.sellingPrice || item.price,
+            originalPrice: item.originalPrice || item.price,
+            total: item.total || (item.price * item.quantity),
+            creditMonth: item.creditMonth,
+            creditPercent: item.creditPercent,
+            monthlyPayment: item.monthlyPayment || null,
+          }))
         },
+      };
+      if ((transactionData as any).customerId) data.customer = { connect: { id: Number((transactionData as any).customerId) } };
+      if (createdByUserId) data.user = { connect: { id: Number(createdByUserId) } };
+      if (soldByUserId) data.soldBy = { connect: { id: Number(soldByUserId) } };
+      if ((transactionData as any).fromBranchId) data.fromBranch = { connect: { id: Number((transactionData as any).fromBranchId) } };
+      if ((transactionData as any).toBranchId) data.toBranch = { connect: { id: Number((transactionData as any).toBranchId) } };
+
+      const transaction = await tx.transaction.create({
+        data,
         include: {
           items: true,
           customer: true,
           user: true,
           soldBy: true,
+          dailyRepayments: true,
         },
       });
+
+      // Persist split immediate payments using existing DailyRepayment table (no schema changes)
+      try {
+        const pt = String((transactionData as any)?.paymentType || '').toUpperCase();
+        const isImmediate = ['CASH', 'CARD', 'TERMINAL'].includes(pt);
+        if (Array.isArray(immediatePayments) && immediatePayments.length > 0 && isImmediate) {
+          const valid = immediatePayments
+            .filter((p: any) => p && ['CASH', 'CARD', 'TERMINAL'].includes(String(p.channel).toUpperCase()) && Number(p.amount) > 0)
+            .map((p: any) => ({
+              transactionId: transaction.id,
+              channel: String(p.channel).toUpperCase(),
+              amount: Number(p.amount),
+              paidAt: transaction.createdAt as any,
+              paidByUserId: Number(soldByUserId || createdByUserId) || null,
+              branchId: Number((transactionData as any)?.fromBranchId) || null,
+            }));
+          if (valid.length > 0) {
+            await (tx as any).dailyRepayment.createMany({ data: valid });
+          }
+        }
+      } catch (e) {
+        try { console.warn('[TransactionService] Failed to persist immediate payments via DailyRepayment:', (e as any)?.message || e); } catch {}
+      }
 
       // Decrement inventory for SALE transactions immediately
       if ((transactionData as any)?.type === 'SALE') {
@@ -583,7 +626,7 @@ export class TransactionService {
         soldBy: true,
         fromBranch: true,
         toBranch: true,
-        paymentSchedules: true
+        paymentSchedules: true,
       }
     });
     if (!tx) throw new NotFoundException('Transaction not found');
@@ -619,6 +662,7 @@ export class TransactionService {
         soldBy: true,
         fromBranch: true,
         toBranch: true,
+        dailyRepayments: true,
       },
       orderBy: { createdAt: 'desc' },
       ...(take ? { take } : {})

@@ -27,6 +27,16 @@ export class CustomerDto {
   jshshir?: string; 
 }
 
+export class ImmediatePaymentEntryDto {
+  @IsString()
+  channel: 'CASH' | 'CARD' | 'TERMINAL';
+
+  @IsNumber()
+  @Min(0)
+  amount: number;
+}
+
+
 export class TransactionItemDto {
   @IsNumber()
   @IsPositive()
@@ -165,6 +175,12 @@ export class CreateTransactionDto {
   @ValidateNested({ each: true })
   @Type(() => TransactionItemDto)
   items: TransactionItemDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ImmediatePaymentEntryDto)
+  immediatePayments?: ImmediatePaymentEntryDto[];
 
   // Validationni service da qilish maqsadga muvofiq
 }

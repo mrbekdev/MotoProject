@@ -162,6 +162,7 @@ model Branch {
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
   phoneNumber      String?
+  customerInfoOptional Boolean             @default(false)
   status           BranchStatus           @default(ACTIVE)
   products         Product[]
   transactions     Transaction[]          @relation("FromBranch")
@@ -660,6 +661,7 @@ model TransactionBonusProduct {
   @@index([transactionId])
   @@index([productId])
 }
+
 
 model WorkSchedule {
   id            Int      @id @default(autoincrement())

@@ -9,12 +9,14 @@ export class BranchService {
   constructor(private prisma: PrismaService) {}
 
   async create(createBranchDto: CreateBranchDto) {
-    const { name, location, type } = createBranchDto as { name: string; location?: string; type?: string };
+    const { name, location, type, phoneNumber, customerInfoOptional } = createBranchDto as any;
     return this.prisma.branch.create({
       data: {
         name,
         address: location || null,
-        type: type as BranchType|| 'SAVDO_MARKAZ',
+        type: (type as BranchType) || 'SAVDO_MARKAZ',
+        phoneNumber: phoneNumber || null,
+        customerInfoOptional: Boolean(customerInfoOptional) || false,
         createdAt: new Date(),
         updatedAt: new Date(),
       },
@@ -30,6 +32,7 @@ export class BranchService {
         address: true,
         type: true,
         phoneNumber: true,
+        customerInfoOptional: true,
         cashBalance: true,
         createdAt: true,
         updatedAt: true,
@@ -48,6 +51,7 @@ export class BranchService {
         address: true,
         type: true,
         phoneNumber: true,
+        customerInfoOptional: true,
         cashBalance: true,
         createdAt: true,
         updatedAt: true,
@@ -58,7 +62,7 @@ export class BranchService {
   }
 
 async update(id: number, updateBranchDto: UpdateBranchDto) {
-  const { name, location, type } = updateBranchDto as { name?: string; location?: string; type?: string };
+  const { name, location, type, phoneNumber, customerInfoOptional } = updateBranchDto as any;
 
   return this.prisma.branch.update({
     where: { id },
@@ -66,8 +70,9 @@ async update(id: number, updateBranchDto: UpdateBranchDto) {
       ...(name !== undefined ? { name } : {}),
       ...(location !== undefined ? { address: location } : {}),
       ...(type !== undefined ? { type: type as BranchType } : {}),
+      ...(phoneNumber !== undefined ? { phoneNumber } : {}),
+      ...(customerInfoOptional !== undefined ? { customerInfoOptional: Boolean(customerInfoOptional) } : {}),
       updatedAt: new Date(),
-      phoneNumber: updateBranchDto.phoneNumber,
     },
   });
 }
