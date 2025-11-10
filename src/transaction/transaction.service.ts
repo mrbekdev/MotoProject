@@ -16,6 +16,30 @@ export class TransactionService {
     private deliveryGateway: DeliveryTasksGateway,
   ) {}
 
+  // Normalize phone to a consistent format for storage/lookup
+  // - removes spaces and non-digits except leading '+'
+  // - if it looks like 12 digits starting with 998, ensures it has leading '+'
+  private normalizePhone(input?: string | null): string | null {
+    if (!input) return null;
+    const raw = String(input).trim();
+    // Remove spaces
+    let p = raw.replace(/\s+/g, '');
+    // If there are letters or other characters (except leading '+'), strip non-digits
+    const hasOnlyPlusAndDigits = /^\+?\d+$/.test(p);
+    if (!hasOnlyPlusAndDigits) {
+      p = p.replace(/[^\d+]/g, '');
+    }
+    // Ensure + on 12-digit Uzbekistan numbers
+    if (/^998\d{9}$/.test(p)) {
+      p = `+${p}`;
+    }
+    // Also handle missing plus on already +998 formatted numbers without plus
+    if (/^\d{12}$/.test(p) && p.startsWith('998')) {
+      p = `+${p}`;
+    }
+    return p || null;
+  }
+
   async create(createTransactionDto: CreateTransactionDto, userId?: number) {
     const { items, customer, ...restDto } = createTransactionDto as any;
     // Extract client-side helpers so they don't leak into Prisma create()
@@ -41,16 +65,33 @@ export class TransactionService {
     // Customer yaratish yoki mavjudini yangilash (passportSeries va jshshir-ni ham saqlash)
     let customerId: number | null = null;
     if (customer) {
-      const existingCustomer = await this.prisma.customer.findFirst({
-        where: { phone: customer.phone }
-      });
-      
+      const rawPhone = (customer as any).phone as string | undefined;
+      const normalizedPhone = this.normalizePhone(rawPhone);
+
+      // Try to find existing customer by several phone variants if phone present
+      let existingCustomer: any = null;
+      if (normalizedPhone) {
+        const variants = new Set<string>();
+        variants.add(normalizedPhone);
+        variants.add((normalizedPhone || '').replace(/\s+/g, ''));
+        const noPlus = normalizedPhone.startsWith('+') ? normalizedPhone.substring(1) : normalizedPhone;
+        variants.add(noPlus);
+        // If starts with +998 add plain 998 variant
+        if (/^\+998\d{9}$/.test(normalizedPhone)) variants.add(`998${normalizedPhone.substring(4)}`);
+        existingCustomer = await this.prisma.customer.findFirst({
+          where: { phone: { in: Array.from(variants) } }
+        });
+      }
+
       if (existingCustomer) {
         customerId = existingCustomer.id;
         // Agar yangi ma'lumotlar kelgan bo'lsa, ularni yangilaymiz
         const updateData: any = {};
         if (customer.fullName && customer.fullName !== existingCustomer.fullName) {
           updateData.fullName = customer.fullName;
+        }
+        if (normalizedPhone && normalizedPhone !== existingCustomer.phone) {
+          updateData.phone = normalizedPhone;
         }
         if (customer.passportSeries && customer.passportSeries !== existingCustomer.passportSeries) {
           updateData.passportSeries = customer.passportSeries;
@@ -68,10 +109,11 @@ export class TransactionService {
           });
         }
       } else {
+        // Create even if phone is missing; store normalized phone if present
         const newCustomer = await this.prisma.customer.create({
           data: {
             fullName: customer.fullName ? customer.fullName : '',
-            phone: customer.phone ? customer.phone : '',
+            phone: normalizedPhone || (rawPhone ? rawPhone.replace(/\s+/g, '') : ''),
             passportSeries: customer.passportSeries || null,
             jshshir: customer.jshshir || null,
             address: customer.address || null,
@@ -152,7 +194,10 @@ export class TransactionService {
           }))
         },
       };
-      if ((transactionData as any).customerId) data.customer = { connect: { id: Number((transactionData as any).customerId) } };
+      const connectCustomerId = (customerId != null ? Number(customerId) : undefined) ?? ((transactionData as any).customerId != null ? Number((transactionData as any).customerId) : undefined);
+      if (connectCustomerId) {
+        data.customer = { connect: { id: connectCustomerId } };
+      }
       if (createdByUserId) data.user = { connect: { id: Number(createdByUserId) } };
       if (soldByUserId) data.soldBy = { connect: { id: Number(soldByUserId) } };
       if ((transactionData as any).fromBranchId) data.fromBranch = { connect: { id: Number((transactionData as any).fromBranchId) } };
@@ -357,10 +402,6 @@ export class TransactionService {
     return createdTransaction;
   }
 
-  /**
-   * Recalculate bonuses for a given transaction.
-   * Used after bonus products are added/updated to ensure net pool subtracts their value.
-   */
   async recalculateBonusesForTransaction(transactionId: number) {
     if (!transactionId || isNaN(Number(transactionId))) {
       throw new BadRequestException('Invalid transaction ID');
@@ -639,7 +680,9 @@ export class TransactionService {
       endDate,
       branchId,
       type,
-      limit
+      limit,
+      include: includeParam,
+      fields: fieldsParam,
     } = query || {};
 
     const where: any = {};
@@ -653,21 +696,88 @@ export class TransactionService {
 
     const take = limit === 'all' ? undefined : (Number(limit) || 50);
 
-    const transactions = await this.prisma.transaction.findMany({
+    // Build include from query (defaults keep current behavior)
+    const includeSet = new Set<string>(
+      String(includeParam || '')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const wantAllDefault = includeSet.size === 0; // no include passed -> include common relations
+    const include: any = {
+      // Always include items with product to satisfy frontend expectations (DefectiveManagement.jsx)
+      items: { include: { product: true } },
+      // Always include minimal user and soldBy to provide phone fallback
+      user: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      soldBy: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      // Other relations are optional/defaults
+      customer: wantAllDefault || includeSet.has('customer'),
+      fromBranch: wantAllDefault || includeSet.has('frombranch'),
+      toBranch: wantAllDefault || includeSet.has('tobranch'),
+      dailyRepayments: wantAllDefault || includeSet.has('dailyrepayments'),
+      paymentSchedules: includeSet.has('paymentschedules'),
+    };
+
+    // Remove false keys to avoid Prisma validation errors
+    Object.keys(include).forEach((k) => include[k] === false && delete include[k]);
+
+    // Optional scalar field selection
+    let select: any | undefined;
+    if (fieldsParam) {
+      select = {};
+      const fieldSet = new Set<string>(
+        String(fieldsParam)
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+      for (const f of fieldSet) select[f] = true;
+      // Ensure id and createdAt are present
+      select.id = true;
+      select.createdAt = select.createdAt ?? true;
+      // Ensure extraProfit is included as requested by frontend
+      select.extraProfit = true;
+      // When select is used, relations must be added under select
+      if (include.customer) select.customer = { select: { id: true, fullName: true, phone: true } };
+      if (include.items) select.items = { include: { product: true } } as any;
+      if (include.user) select.user = { select: { id: true, firstName: true, lastName: true } };
+      if (include.soldBy) select.soldBy = { select: { id: true, firstName: true, lastName: true } };
+      if (include.fromBranch) select.fromBranch = true;
+      if (include.toBranch) select.toBranch = true;
+      if (include.dailyRepayments) select.dailyRepayments = true;
+      if (include.paymentSchedules) select.paymentSchedules = true;
+    }
+
+    const queryArgs: any = {
       where,
-      include: {
-        customer: true,
-        items: { include: { product: true } },
-        user: true,
-        soldBy: true,
-        fromBranch: true,
-        toBranch: true,
-        dailyRepayments: true,
-      },
       orderBy: { createdAt: 'desc' },
-      ...(take ? { take } : {})
+      ...(take ? { take } : {}),
+      ...(select ? { select } : { include }),
+    };
+
+    const transactions = await this.prisma.transaction.findMany(queryArgs);
+    const normalized = transactions.map((t: any) => {
+      const clean = (v: any) => (typeof v === 'string' ? v.trim() : '');
+      const fullFromModel = clean(t?.customer?.fullName);
+      const phoneFromCustomer = clean(t?.customer?.phone);
+      const prevDerived = clean(t?.customerName);
+      const soldByName = [clean(t?.soldBy?.firstName), clean(t?.soldBy?.lastName)].filter(Boolean).join(' ').trim();
+      const userName = [clean(t?.user?.firstName), clean(t?.user?.lastName)].filter(Boolean).join(' ').trim();
+      const resolvedName = fullFromModel || prevDerived || soldByName || userName || '';
+      const resolvedPhone = phoneFromCustomer || '';
+      const ensuredCustomer = {
+        ...(t?.customer || {}),
+        fullName: (resolvedName || 'Номаълум'),
+        phone: resolvedPhone,
+      };
+      return {
+        ...t,
+        customer: ensuredCustomer,
+        customerName: ensuredCustomer.fullName,
+        extraProfit: Number(t?.extraProfit || 0),
+      };
     });
-    return { transactions };
+    return { transactions: normalized };
   }
 
   async findByType(type: string) {

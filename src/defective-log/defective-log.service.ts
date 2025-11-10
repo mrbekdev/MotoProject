@@ -315,10 +315,9 @@ export class DefectiveLogService {
                   await prisma.transactionBonusProduct.deleteMany({ where: { transactionId: tx.id } });
                 }
 
-                // Delete all bonuses tied to this transaction (sales bonus, penalty, updates)
                 await (prisma as any).bonus.deleteMany({ where: { transactionId: tx.id } });
-                // Also reset any extraProfit stored on the transaction
-                await prisma.transaction.update({ where: { id: tx.id }, data: { extraProfit: 0 } });
+                const refundAmount = Math.abs(cashAmount);
+                await prisma.transaction.update({ where: { id: tx.id }, data: { extraProfit: -refundAmount } });
               }
             }
 
