@@ -909,7 +909,16 @@ export class TransactionService {
     // Sync related transaction
     try {
       const txId = Number(task.transactionId);
-      const txData: any = { status: status as any, updatedById: userId || null };
+      const txData: any = { updatedById: userId || null };
+      // Map task status -> transaction status (TransactionStatus has no IN_PROGRESS)
+      if (status === 'COMPLETED') {
+        txData.status = TransactionStatus.COMPLETED;
+      } else if (status === 'CANCELLED') {
+        txData.status = TransactionStatus.CANCELLED;
+      } else {
+        // For PENDING or IN_PROGRESS keep transaction as PENDING
+        txData.status = TransactionStatus.PENDING;
+      }
       if (status === 'IN_PROGRESS' && userId) {
         // Assign transaction to the same user on accept
         txData.deliveryUserId = Number(userId);
