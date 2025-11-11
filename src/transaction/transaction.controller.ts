@@ -90,6 +90,15 @@ export class TransactionController {
     return this.transactionService.updateTaskStatus(parseInt(taskId), body.status, actorId);
   }
 
+  @Put('tasks/:taskId/cancel')
+  async cancelTask(
+    @Param('taskId') taskId: string,
+    @CurrentUser() user: any
+  ) {
+    // Set status to PENDING and clear auditorId in service; actorId is not needed for cancel
+    return this.transactionService.updateTaskStatus(parseInt(taskId), 'PENDING', undefined);
+  }
+
   @Get('product/:productId')
   async findByProductId(
     @Param('productId') productId: string,

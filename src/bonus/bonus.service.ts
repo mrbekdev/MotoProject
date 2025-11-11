@@ -43,6 +43,62 @@ export class BonusService {
     });
   }
 
+  async getUserTransactionsExtraProfit(
+    userId: number,
+    startDate?: string,
+    endDate?: string,
+    branchId?: number,
+  ) {
+    const where: any = {
+      userId,
+      reason: 'SALES_BONUS',
+      transaction: {
+        ...(startDate || endDate
+          ? {
+              createdAt: {
+                ...(startDate ? { gte: new Date(startDate) } : {}),
+                ...(endDate ? { lte: new Date(endDate) } : {}),
+              },
+            }
+          : {}),
+        ...(branchId ? { fromBranchId: Number(branchId) } : {}),
+      },
+    };
+
+    const bonuses = await (this.prisma as any).bonus.findMany({
+      where,
+      select: {
+        transactionId: true,
+        transaction: {
+          select: {
+            id: true,
+            extraProfit: true,
+            createdAt: true,
+            fromBranchId: true,
+          },
+        },
+      },
+    });
+
+    const seen = new Set<number>();
+    let totalExtraProfit = 0;
+    const transactionIds: number[] = [];
+    for (const b of bonuses) {
+      const tx = b.transaction;
+      if (!tx || tx.id == null) continue;
+      if (seen.has(tx.id)) continue;
+      seen.add(tx.id);
+      transactionIds.push(tx.id);
+      totalExtraProfit += Number(tx.extraProfit || 0);
+    }
+
+    return {
+      totalExtraProfit,
+      count: transactionIds.length,
+      transactionIds,
+    };
+  }
+
   async findAll(skip = 0, take = 100) {
     return (this.prisma as any).bonus.findMany({
       skip,

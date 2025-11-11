@@ -1013,6 +1013,10 @@ export class TransactionService {
       // If somehow was not assigned, backfill assignment to the actor
       taskUpdate.auditorId = Number(userId);
     }
+    if (status === 'PENDING') {
+      // On cancel to pending, unassign any auditor
+      taskUpdate.auditorId = null;
+    }
     const updatedTask = await (this.prisma as any).task.update({ where: { id: Number(taskId) }, data: taskUpdate });
     try { this.deliveryGateway.emitTaskUpdated({ id: updatedTask.id, transactionId: updatedTask.transactionId, status: updatedTask.status, auditorId: updatedTask.auditorId }); } catch {}
 
@@ -1032,6 +1036,9 @@ export class TransactionService {
       if (status === 'IN_PROGRESS' && userId) {
         // Assign transaction to the same user on accept
         txData.deliveryUserId = Number(userId);
+      } else if (status === 'PENDING') {
+        // On cancel to pending, unassign any delivery user
+        txData.deliveryUserId = null;
       }
       await this.prisma.transaction.update({ where: { id: txId }, data: txData });
     } catch (e) {
@@ -1749,18 +1756,13 @@ export class TransactionService {
           continue;
         }
 
-        // Sotish narxini doim UZS da ishlatamiz:
-        // - Agar item.sellingPrice mavjud bo'lsa, u allaqachon UZS (frontenddan keladi)
-        // - Aks holda, item.price USD bo'lishi mumkin, shuning uchun USD -> UZS konvertatsiya qilamiz
+        // Sotish narxini doim UZS da ishlatamiz.
+        // Agar item.sellingPrice mavjud bo'lsa, u frontenddan UZS ko'rinishida keladi va BE tarafida konvertatsiya qilinmaydi.
+        // Aks holda, item.price USD bo'lishi mumkin, shuning uchun USD -> UZS konvertatsiya qilamiz.
         let sellingPrice = 0;
         if (item?.sellingPrice != null) {
           const rawSp = Number(item.sellingPrice);
-          // Agar sellingPrice juda kichik bo'lsa (USD ehtimoli), USD->UZS aylantiramiz
-          if (rawSp > 0 && rawSp < Math.max(usdToSomRate / 2, 10000)) {
-            sellingPrice = Math.round(rawSp * usdToSomRate);
-          } else {
-            sellingPrice = Math.round(rawSp);
-          }
+          sellingPrice = Math.round(rawSp);
         } else {
           const sellingPriceUsd = Number(item.price || 0);
           sellingPrice = Math.round(sellingPriceUsd * usdToSomRate);

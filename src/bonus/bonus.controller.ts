@@ -64,6 +64,22 @@ export class BonusController {
     return this.bonusService.getTotalBonusByUserId(+userId);
   }
 
+  @Get('user/:userId/extra-profit')
+  @ApiOperation({ summary: 'Get total extraProfit of transactions tied to user\'s SALES_BONUS entries' })
+  async getUserExtraProfit(
+    @Param('userId') userId: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.bonusService.getUserTransactionsExtraProfit(
+      +userId,
+      startDate,
+      endDate,
+      branchId ? Number(branchId) : undefined,
+    );
+  }
+
   @Get('transaction/:transactionId')
   @ApiOperation({ summary: 'Get bonus details by transaction ID' })
   @ApiResponse({ status: 200, description: 'Bonus details found' })
