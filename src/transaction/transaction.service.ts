@@ -43,7 +43,11 @@ export class TransactionService {
   async create(createTransactionDto: CreateTransactionDto, userId?: number) {
     const { items, customer, ...restDto } = createTransactionDto as any;
     // Extract client-side helpers so they don't leak into Prisma create()
-    const immediatePayments: Array<{ channel: string; amount: number }> = (restDto as any).immediatePayments || (restDto as any).payments || [];
+    const immediatePayments: Array<{ channel: string; amount: number }> =
+      (restDto as any).immediatePayments ||
+      (restDto as any).payments ||
+      (restDto as any).splitPayments ||
+      [];
     const {
       cashierId,
       immediatePayments: _omitImmediate,
@@ -217,7 +221,7 @@ export class TransactionService {
       // Persist split immediate payments using existing DailyRepayment table (no schema changes)
       try {
         const pt = String((transactionData as any)?.paymentType || '').toUpperCase();
-        const isImmediate = ['CASH', 'CARD', 'TERMINAL'].includes(pt);
+        const isImmediate = ['CASH', 'CARD', 'TERMINAL', 'MIXED'].includes(pt);
         if (Array.isArray(immediatePayments) && immediatePayments.length > 0 && isImmediate) {
           const valid = immediatePayments
             .filter((p: any) => p && ['CASH', 'CARD', 'TERMINAL'].includes(String(p.channel).toUpperCase()) && Number(p.amount) > 0)
@@ -231,6 +235,21 @@ export class TransactionService {
             }));
           if (valid.length > 0) {
             await (tx as any).dailyRepayment.createMany({ data: valid });
+          }
+        } else if (isImmediate) {
+          // Fallback: if no split array provided but amountPaid present, persist as a single-channel repayment
+          const amt = Number((transactionData as any)?.amountPaid || 0) || 0;
+          if (amt > 0 && ['CASH', 'CARD', 'TERMINAL'].includes(pt)) {
+            await (tx as any).dailyRepayment.create({
+              data: {
+                transactionId: transaction.id,
+                channel: pt,
+                amount: amt,
+                paidAt: transaction.createdAt as any,
+                paidByUserId: Number(soldByUserId || createdByUserId) || null,
+                branchId: Number((transactionData as any)?.fromBranchId) || null,
+              }
+            });
           }
         }
       } catch (e) {
