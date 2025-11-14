@@ -17,6 +17,11 @@ export class UpdateProductDto {
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
+  code?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
   description?: string;
 
   @ApiProperty({ required: false })

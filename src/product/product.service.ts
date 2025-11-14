@@ -13,7 +13,7 @@ export class ProductService {
     private currencyExchangeRateService: CurrencyExchangeRateService,
   ) {}
 private async generateUniqueBarcode(tx: any): Promise<string> {
-  // mavjud counterni olamiz yoki 0 yaratib qo'yamiz
+
   let counterRecord = await tx.barcodeCounter.findFirst();
 
   if (!counterRecord) {
@@ -41,6 +41,7 @@ async create(
     data: {
       name: createProductDto.name,
       barcode: await this.generateUniqueBarcode(prismaClient),
+      code: createProductDto.code,
       categoryId: createProductDto.categoryId,
       branchId: createProductDto.branchId,
       price: createProductDto.price,
@@ -92,6 +93,7 @@ async create(
       where.OR = [
         { name: { contains: search, mode: 'insensitive' } },
         { barcode: { contains: search, mode: 'insensitive' } },
+        { code: { contains: search, mode: 'insensitive' } },
       ];
     }
     if (!includeZeroQuantity) {
@@ -202,6 +204,7 @@ async update(
     where: { id },
     data: {
       name: updateProductDto.name,
+      code: updateProductDto.code,
       categoryId: updateProductDto.categoryId,
       branchId: updateProductDto.branchId,
       price: updateProductDto.price,
@@ -682,6 +685,9 @@ return this.prisma.$transaction(async (tx) => {
       marketPrice: row['marketPrice'] ? Number(row['marketPrice']) : undefined,
       model: row['model'] ? String(row['model']) : undefined,
       description: row['description'] ? String(row['description']) : undefined,
+      code: (row['code'] ?? row['Code'] ?? row['Код'])
+        ? String(row['code'] ?? row['Code'] ?? row['Код'])
+        : undefined,
       branchId: fromBranchId,
       categoryId: categoryId,
       status: (status || 'IN_STORE') as ProductStatus,

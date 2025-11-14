@@ -180,6 +180,7 @@ model Branch {
   bonuses          Bonus[]
   attendanceDays   AttendanceDay[]
   attendanceEvents AttendanceEvent[]
+  expenses         Expense[]
 
   @@index([name])
 }
@@ -283,6 +284,7 @@ model Product {
   id                Int                       @id @default(autoincrement())
   name              String
   barcode           String?
+  code              String?
   model             String?
   price             Float
   quantity          Int
@@ -308,6 +310,7 @@ model Product {
   bonusProducts     TransactionBonusProduct[]
 
   @@unique([barcode, branchId], name: "barcode_branchId")
+  @@index([code])
   @@index([isDeleted])
   @@index([branchId, isDeleted])
 }
@@ -701,4 +704,18 @@ model FaceTemplate {
 model IntStore {
   id    Int  @id @default(autoincrement())
   value Int
+}
+
+model Expense {
+  id          Int      @id @default(autoincrement())
+  amount      Float
+  reason      String
+  description String?
+  branchId    Int?
+  createdAt   DateTime @default(now())
+
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([branchId])
 }

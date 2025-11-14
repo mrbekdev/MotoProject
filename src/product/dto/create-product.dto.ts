@@ -11,6 +11,10 @@ export class CreateProductDto {
 
   @IsString()
   @IsOptional()
+  code?: string;
+
+  @IsString()
+  @IsOptional()
   model?: string;
 
   @IsNumber()

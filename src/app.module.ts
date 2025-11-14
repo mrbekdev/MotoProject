@@ -22,6 +22,7 @@ import { WorkScheduleModule } from './work-schedule/work-schedule.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { IntStoreModule } from './int-store/int-store.module';
 import { UserBranchAccessModule } from './user-branch-access/user-branch-access.module';
+import { ExpenseModule } from './expense/expense.module';
 
 
 @Module({
@@ -45,7 +46,8 @@ import { UserBranchAccessModule } from './user-branch-access/user-branch-access.
     WorkScheduleModule, 
     AttendanceModule,
     UserBranchAccessModule,
-    IntStoreModule
+    IntStoreModule,
+    ExpenseModule
   ],
   controllers: [AppController],
   providers: [AppService],
