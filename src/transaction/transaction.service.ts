@@ -15,16 +15,11 @@ export class TransactionService {
     private bonusService: BonusService,
     private deliveryGateway: DeliveryTasksGateway,
   ) {}
-
-  // Normalize phone to a consistent format for storage/lookup
-  // - removes spaces and non-digits except leading '+'
-  // - if it looks like 12 digits starting with 998, ensures it has leading '+'
   private normalizePhone(input?: string | null): string | null {
     if (!input) return null;
     const raw = String(input).trim();
     // Remove spaces
     let p = raw.replace(/\s+/g, '');
-    // If there are letters or other characters (except leading '+'), strip non-digits
     const hasOnlyPlusAndDigits = /^\+?\d+$/.test(p);
     if (!hasOnlyPlusAndDigits) {
       p = p.replace(/[^\d+]/g, '');
@@ -42,6 +37,7 @@ export class TransactionService {
 
   async create(createTransactionDto: CreateTransactionDto, userId?: number) {
     const { items, customer, ...restDto } = createTransactionDto as any;
+    const itemsList: any[] = Array.isArray(items) ? [...items] : [];
     // Extract client-side helpers so they don't leak into Prisma create()
     const immediatePayments: Array<{ channel: string; amount: number }> =
       (restDto as any).immediatePayments ||
@@ -137,11 +133,65 @@ export class TransactionService {
     const createdByUserId = userId ?? transactionData.userId ?? null;
     const soldByUserId = (transactionData as any).soldByUserId ?? userId ?? createdByUserId ?? null;
 
+    // Try to resolve missing/invalid productIds from barcode/code/name within fromBranch
+    try {
+      const fbId = Number((transactionData as any)?.fromBranchId) || undefined;
+      for (let i = 0; i < itemsList.length; i++) {
+        const it = itemsList[i] || {};
+        const pid = Number(it.productId);
+        if (Number.isFinite(pid) && pid > 0) continue;
+        const where: any = { AND: [] as any[] };
+        if (fbId) where.AND.push({ branchId: fbId });
+        const or: any[] = [];
+        const bc = (it.barcode || it.productBarcode || '').trim();
+        const code = (it.code || it.productCode || '').trim();
+        const name = (it.productName || it.name || '').trim();
+        if (bc) or.push({ barcode: bc });
+        if (code) or.push({ code: code });
+        if (name) or.push({ name: { contains: name, mode: 'insensitive' } });
+        if (or.length === 0) continue;
+        where.AND.push({ OR: or });
+        let found = await this.prisma.product.findFirst({ where, select: { id: true } });
+        if (!found) {
+          // Fallback: search without branch constraint
+          const whereAny: any = { OR: or };
+          found = await this.prisma.product.findFirst({ where: whereAny, select: { id: true } });
+        }
+        if (found?.id) {
+          itemsList[i] = { ...it, productId: Number(found.id) };
+        }
+      }
+    } catch (e) {
+      try { console.warn('[TransactionService] productId resolve fallback failed:', (e as any)?.message || e); } catch {}
+    }
+
+    // Validate product IDs early to avoid FK violations and provide actionable errors
+    try {
+      const productIds = (Array.isArray(itemsList) ? itemsList : [])
+        .map((it: any) => Number(it?.productId))
+        .filter((v: any) => Number.isFinite(v) && v > 0);
+      if (productIds.length === 0) {
+        throw new BadRequestException('No valid items provided');
+      }
+      const existing = await this.prisma.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true },
+      });
+      const existingSet = new Set<number>(existing.map((p) => p.id));
+      const missing = productIds.filter((id) => !existingSet.has(id));
+      if (missing.length > 0) {
+        throw new BadRequestException(`Invalid productIds (not found): ${missing.join(', ')}`);
+      }
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      try { console.warn('[TransactionService] Product validation failed:', (e as any)?.message || e); } catch {}
+    }
+
     // Compute totals and interest ONCE at sale time to avoid monthly reapplication
     let computedTotal = 0;
     let weightedPercentSum = 0;
     let percentWeightBase = 0;
-    for (const item of items) {
+    for (const item of itemsList) {
       const principal = (item.price || 0) * (item.quantity || 0);
       computedTotal += principal;
       if (item.creditPercent) {
@@ -185,7 +235,7 @@ export class TransactionService {
         lastRepaymentDate: transactionData.lastRepaymentDate,
         extraProfit: transactionData.extraProfit,
         items: {
-          create: items.map((item: any) => ({
+          create: itemsList.map((item: any) => ({
             productId: item.productId,
             quantity: item.quantity,
             price: item.price,
@@ -217,6 +267,104 @@ export class TransactionService {
           dailyRepayments: true,
         },
       });
+
+      // Create payment schedules for CREDIT/INSTALLMENT
+      try {
+        const pt = String((transactionData as any)?.paymentType || '').toUpperCase();
+        if (['CREDIT', 'INSTALLMENT'].includes(pt)) {
+          const termUnit = String((transactionData as any)?.termUnit || 'MONTHS').toUpperCase();
+          const days = Number((transactionData as any)?.days || 0) || 0;
+          // Strict months detection only for MONTHS
+          let months = 0;
+          if (termUnit === 'MONTHS') {
+            const monthsFromDto = Number((transactionData as any)?.months);
+            const monthsFromItems = (() => {
+              try {
+                const v = (itemsList || []).map((it: any) => Number(it?.creditMonth || 0)).find((n) => Number.isFinite(n) && n > 0);
+                return Number(v) || 0;
+              } catch { return 0; }
+            })();
+            const raw = Number.isFinite(monthsFromDto) && monthsFromDto > 0 ? monthsFromDto : monthsFromItems;
+            months = Number(raw || 0);
+            if (!Number.isFinite(months) || months <= 0) months = 12;
+          }
+          const schedules: any[] = [];
+          const now = new Date();
+          const addMonths = (d: Date, m: number) => {
+            const nd = new Date(d.getTime());
+            nd.setMonth(nd.getMonth() + m);
+            return nd;
+          };
+          const addDays = (d: Date, dd: number) => {
+            const nd = new Date(d.getTime());
+            nd.setDate(nd.getDate() + dd);
+            return nd;
+          };
+
+          if (termUnit === 'DAYS') {
+            // Exactly one daily schedule with dueDate = today + days
+            schedules.push({
+              transactionId: transaction.id,
+              month: 1,
+              payment: remainingWithInterest,
+              paidAmount: 0,
+              isPaid: false,
+              isDailyInstallment: true as any,
+              daysCount: days > 0 ? days : null,
+              remainingBalance: remainingWithInterest,
+              installmentType: 'DAILY',
+              totalDays: days > 0 ? days : null,
+              remainingDays: days > 0 ? days : null,
+              dueDate: days > 0 ? addDays(now, days) : addDays(now, 1),
+            });
+          } else {
+            // Monthly: create N schedules with dueDate starting next month
+            const count = Math.max(1, Number(months) || 12);
+            if (remainingWithInterest > 0) {
+              const base = Math.floor(remainingWithInterest / count);
+              let acc = 0;
+              for (let i = 1; i <= count; i++) {
+                const isLast = i === count;
+                const payment = isLast ? (remainingWithInterest - acc) : base;
+                acc += payment;
+                schedules.push({
+                  transactionId: transaction.id,
+                  month: i,
+                  payment,
+                  paidAmount: 0,
+                  isPaid: false,
+                  remainingBalance: payment,
+                  installmentType: 'MONTHLY',
+                  totalMonths: count,
+                  remainingMonths: count - i + 1,
+                  dueDate: addMonths(now, i),
+                });
+              }
+            } else {
+              const count2 = Math.max(1, Number(months) || 12);
+              for (let i = 1; i <= count2; i++) {
+                schedules.push({
+                  transactionId: transaction.id,
+                  month: i,
+                  payment: 0,
+                  paidAmount: 0,
+                  isPaid: true,
+                  remainingBalance: 0,
+                  installmentType: 'MONTHLY',
+                  totalMonths: count2,
+                  remainingMonths: count2 - i + 1,
+                  dueDate: addMonths(now, i),
+                });
+              }
+            }
+          }
+          if (schedules.length > 0) {
+            await (tx as any).paymentSchedule.createMany({ data: schedules });
+          }
+        }
+      } catch (e) {
+        try { console.warn('[TransactionService] Failed to create payment schedules:', (e as any)?.message || e); } catch {}
+      }
 
       // Persist split immediate payments using existing DailyRepayment table (no schema changes)
       try {
@@ -258,7 +406,7 @@ export class TransactionService {
 
       // Decrement inventory for SALE transactions immediately
       if ((transactionData as any)?.type === 'SALE') {
-        for (const it of items) {
+        for (const it of itemsList) {
           if (!it.productId) continue;
           const prod = await tx.product.findUnique({
             where: { id: it.productId },
@@ -698,19 +846,44 @@ export class TransactionService {
       startDate,
       endDate,
       branchId,
+      customerId,
       type,
       limit,
       include: includeParam,
       fields: fieldsParam,
+      paymentType,
+      paymentTypes,
+      userId,
     } = query || {};
 
     const where: any = {};
     if (type) where.type = type as any;
     if (branchId) where.OR = [{ fromBranchId: Number(branchId) }, { toBranchId: Number(branchId) }];
+    if (customerId) where.customerId = Number(customerId);
+    if (paymentType) where.paymentType = String(paymentType).toUpperCase();
+    if (paymentTypes) {
+      const list = String(paymentTypes)
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+      if (list.length > 0) where.paymentType = { in: list } as any;
+    }
     if (startDate || endDate) {
       where.createdAt = {};
       if (startDate) where.createdAt.gte = new Date(startDate);
       if (endDate) where.createdAt.lte = new Date(endDate);
+    }
+
+    // Filter by userId (supports comma-separated list). Matches either creator or seller
+    if (userId) {
+      const ids = String(userId)
+        .split(',')
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (ids.length > 0) {
+        where.OR = Array.isArray(where.OR) ? where.OR : [];
+        where.OR.push({ userId: { in: ids } }, { soldByUserId: { in: ids } });
+      }
     }
 
     const take = limit === 'all' ? undefined : (Number(limit) || 50);
@@ -793,7 +966,7 @@ export class TransactionService {
         ...t,
         customer: ensuredCustomer,
         customerName: ensuredCustomer.fullName,
-        extraProfit: Number(t?.extraProfit || 0),
+        extraProfit: Number((t?.extraProfit ?? (t as any)?.extrProfit ?? 0) || 0),
       };
     });
     return { transactions: normalized };
@@ -2005,7 +2178,6 @@ export class TransactionService {
       }
     } catch (error) {
       console.error(' Bonus hisoblashda xatolik:', error);
-      // Bonus yaratishda xatolik bo'lsa ham, asosiy tranzaksiya davom etsin
     }
   }
 }

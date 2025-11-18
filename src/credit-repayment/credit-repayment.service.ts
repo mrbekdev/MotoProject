@@ -9,11 +9,15 @@ export class CreditRepaymentService {
 
   async create(createCreditRepaymentDto: CreateCreditRepaymentDto) {
     const { transactionId, scheduleId, amount, channel, month, monthNumber, paidAt, paidByUserId, branchId } = createCreditRepaymentDto;
-    
+    // Ensure scheduleId is either a number or null (virtual schedules send strings like 'transaction-81')
+    const parsedScheduleId = (scheduleId === null || scheduleId === undefined)
+      ? null
+      : (Number.isFinite(Number(scheduleId)) ? Number(scheduleId) : null);
+
     return this.prisma.creditRepayment.create({
       data: {
         transactionId,
-        scheduleId,
+        scheduleId: parsedScheduleId,
         amount,
         channel,
         month:month?.toString(),

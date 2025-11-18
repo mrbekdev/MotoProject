@@ -19,15 +19,23 @@ export class PaymentScheduleController {
 
   @Get(':id')
   findOne(@Param('id') id: string) {
-    return this.paymentScheduleService.findOne(+id);
+    const num = Number(id);
+    if (!Number.isFinite(num) || num <= 0) {
+      throw new (require('@nestjs/common').BadRequestException)(`Invalid payment schedule id: ${id}`);
+    }
+    return this.paymentScheduleService.findOne(num);
   }
 
   @Put(':id')
   update(@Param('id') id: string, @Body() updateData: any, @Req() req: Request) {
+    const num = Number(id);
+    if (!Number.isFinite(num) || num <= 0) {
+      throw new (require('@nestjs/common').BadRequestException)(`Invalid payment schedule id: ${id}`);
+    }
     const body = updateData || {};
     const paidByUserId = body.paidByUserId ?? (req as any)?.user?.id ?? null;
     const paidChannel = (body.paidChannel || 'CASH').toString();
     const paidAt = body.paidAt;
-    return this.paymentScheduleService.update(+id, { ...body, paidByUserId, paidChannel, paidAt });
+    return this.paymentScheduleService.update(num, { ...body, paidByUserId, paidChannel, paidAt });
   }
 }

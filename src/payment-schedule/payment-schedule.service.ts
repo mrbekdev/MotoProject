@@ -73,7 +73,9 @@ export class PaymentScheduleService {
     // Build schedule update data with only valid fields
     const data: any = {
       ...validUpdateData,
-      paidAmount: inputHasPaidAmount ? requestedPaidAmount : undefined,
+      // Update paidAmount if either a delta or a new absolute paidAmount is provided
+      paidAmount: (inputHasPaidAmount || inputHasDelta) ? requestedPaidAmount : undefined,
+      // For monthly schedules, if isPaid not provided, infer from requestedPaidAmount vs scheduled payment
       isPaid: isPaid !== undefined ? isPaid : undefined,
       paidAt: effectivePaidAt,
       paidChannel: paidChannel !== undefined ? paidChannel : undefined,
@@ -131,6 +133,16 @@ export class PaymentScheduleService {
         throw new Error(`Payment schedule with ID ${id} not found`);
       }
       
+      // If isPaid not explicitly sent and not a DAILY schedule, infer completion for monthly schedules
+      if (!existing.isDailyInstallment && data.isPaid === undefined && (inputHasPaidAmount || inputHasDelta)) {
+        try {
+          const targetPayment = Number(existing.payment || 0);
+          if (targetPayment > 0 && requestedPaidAmount >= targetPayment) {
+            data.isPaid = true;
+          }
+        } catch {}
+      }
+
       const updatedSchedule = await tx.paymentSchedule.update({
         where: { id },
         data,
@@ -140,7 +152,8 @@ export class PaymentScheduleService {
               customer: true,
               items: { include: { product: true } }
             }
-          }
+          },
+          paidBy: true
         }
       });
 
@@ -210,9 +223,23 @@ export class PaymentScheduleService {
             console.log('Daily installment transaction completed');
           }
         } else {
+          // For monthly schedules, also recompute remaining across all schedules and update parent transaction
+          const siblingSchedules = await tx.paymentSchedule.findMany({
+            where: { transactionId: existing.transactionId },
+            select: { payment: true, paidAmount: true }
+          });
+          const remainingFromSchedules = siblingSchedules.reduce((sum, s) => {
+            const pay = Number(s.payment || 0);
+            const paid = Number(s.paidAmount || 0);
+            return sum + Math.max(0, pay - paid);
+          }, 0);
           await tx.transaction.update({
             where: { id: existing.transactionId },
-            data: { lastRepaymentDate: effectivePaidAt as any }
+            data: {
+              lastRepaymentDate: effectivePaidAt as any,
+              remainingBalance: remainingFromSchedules,
+              creditRepaymentAmount: { increment: deltaPaid }
+            }
           });
         }
         } catch (_) {}
