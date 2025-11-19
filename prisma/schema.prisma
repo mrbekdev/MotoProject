@@ -326,6 +326,9 @@ model DefectiveLog {
   actionType  String   @default("DEFECTIVE") // DEFECTIVE, FIXED, RETURN, EXCHANGE
   createdAt   DateTime @default(now())
 
+  // Link to original sale transaction when applicable (e.g., RETURN from sale)
+  transactionId Int?
+
   // Exchange-specific fields
   exchangeWithProductId    Int? // ID of the product being exchanged with
   replacementQuantity      Int? // Quantity of replacement product
@@ -335,8 +338,10 @@ model DefectiveLog {
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   user    User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
   branch  Branch? @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  transaction Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
 
   @@map("defective_logs")
+  @@index([transactionId])
 }
 
 model Customer {
@@ -410,6 +415,7 @@ model Transaction {
   bonusProducts    TransactionBonusProduct[]
   bonuses          Bonus[]
   tasks            Task[]
+  defectiveLogs    DefectiveLog[]
 
   @@index([customerId])
   @@index([userId])

@@ -192,9 +192,9 @@ export class DefectiveLogService {
         break;
 
       case 'RETURN':
-        // Respect explicit cashier override for cash direction/amount when provided
-        if (typeof cashAmountInput === 'number' && cashAdjustmentDirection) {
-          cashAmount = (cashAdjustmentDirection === 'PLUS' ? 1 : -1) * Math.abs(Number(cashAmountInput) || 0);
+        // Returns must always be cash-out from the cashier (negative)
+        if (typeof cashAmountInput === 'number') {
+          cashAmount = -Math.abs(Number(cashAmountInput) || 0);
         } else {
           // Default behavior: money leaves cashbox (negative)
           cashAmount = -(product.price * quantity);
@@ -237,6 +237,7 @@ export class DefectiveLogService {
           description,
           userId,
           branchId,
+          transactionId: transactionId ? Number(transactionId) : null,
           cashAmount,
           actionType
         },
@@ -370,13 +371,9 @@ export class DefectiveLogService {
               });
             }
             
-            // Recalculate totals (fast query)
-            const newItems = await prisma.transactionItem.findMany({ where: { transactionId: tx.id } });
-            const newTotal = newItems.reduce((s, it) => s + it.total, 0);
-            await prisma.transaction.update({
-              where: { id: tx.id },
-              data: { total: newTotal, finalTotal: newTotal }
-            });
+            // Do NOT mutate transaction.total/finalTotal on returns/exchanges to avoid
+            // changing original payment channel aggregates (cash/card/terminal) and
+            // prevent double effects on dashboard tiles.
 
             // Set recalc flag (run after transaction)
             if (tx.paymentType === 'CREDIT' || tx.paymentType === 'INSTALLMENT') {
