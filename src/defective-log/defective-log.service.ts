@@ -299,26 +299,71 @@ export class DefectiveLogService {
                 });
               }
 
-              // BONUS REVERSAL: Return all bonus products given for this transaction and delete related bonus rows
+              // BONUS REVERSAL: Return bonus products proportionally to returned quantity
+              // IMPORTANT: only for paid (non-zero price) sale lines.
+              // Zero-priced bonus TransactionItem lines should NOT trigger bonus reversal again.
               if (actionType === 'RETURN') {
-                // Restock all transaction bonus products back to inventory once
-                const txBonusProducts = await prisma.transactionBonusProduct.findMany({ where: { transactionId: tx.id } });
-                if (txBonusProducts.length > 0) {
-                  for (const bp of txBonusProducts) {
-                    try {
-                      await prisma.product.update({
-                        where: { id: bp.productId },
-                        data: { quantity: { increment: Number(bp.quantity || 0) } }
-                      });
-                    } catch (_) { /* ignore single product failures to avoid blocking whole return */ }
+                const unitPriceForReturn = (orig as any)?.sellingPrice ?? (orig as any)?.price ?? 0;
+                if (unitPriceForReturn && Number(unitPriceForReturn) !== 0) {
+                  const txBonusProducts = await prisma.transactionBonusProduct.findMany({ where: { transactionId: tx.id } });
+                  if (txBonusProducts.length > 0) {
+                    const soldQty = Number(orig.quantity) || 0;
+                    const returnedQty = Number(quantity) || 0;
+                    if (soldQty > 0 && returnedQty > 0) {
+                      const ratio = returnedQty / soldQty;
+                      for (const bp of txBonusProducts) {
+                        const bonusTotalQty = Number(bp.quantity || 0);
+                        if (bonusTotalQty <= 0) continue;
+
+                        // Proportional bonus quantity to restock
+                        const rawBonusToRestock = bonusTotalQty * ratio;
+                        const bonusToRestock = Math.min(
+                          bonusTotalQty,
+                          Number(rawBonusToRestock.toFixed(4))
+                        );
+                        if (bonusToRestock <= 0) continue;
+
+                        try {
+                          // Load product with category to handle AREA_SQM correctly
+                          const bonusProd = await prisma.product.findUnique({
+                            where: { id: bp.productId },
+                            include: { category: { select: { type: true } } },
+                          });
+                          if (bonusProd) {
+                            const isArea =
+                              (bonusProd as any)?.category?.type === 'AREA_SQM' ||
+                              bonusProd.areaSqm != null;
+
+                            if (isArea) {
+                              const currentArea = Number(bonusProd.areaSqm || 0);
+                              const newArea = currentArea + bonusToRestock;
+                              await prisma.product.update({
+                                where: { id: bonusProd.id },
+                                data: { areaSqm: newArea },
+                              });
+                            } else {
+                              await prisma.product.update({
+                                where: { id: bonusProd.id },
+                                data: {
+                                  quantity: { increment: bonusToRestock },
+                                },
+                              });
+                            }
+                          }
+                        } catch (_) {
+                          // Ignore single product failures to avoid blocking whole return
+                        }
+                      }
+
+                      // After adjusting quantities, fully remove TransactionBonusProduct rows
+                      await prisma.transactionBonusProduct.deleteMany({ where: { transactionId: tx.id } });
+                    }
                   }
-                  // Remove TransactionBonusProduct rows to prevent double-restock on subsequent returns
-                  await prisma.transactionBonusProduct.deleteMany({ where: { transactionId: tx.id } });
                 }
 
+                // Remove all bonus rows for this transaction and reset extraProfit to 0
                 await (prisma as any).bonus.deleteMany({ where: { transactionId: tx.id } });
-                const refundAmount = Math.abs(cashAmount);
-                await prisma.transaction.update({ where: { id: tx.id }, data: { extraProfit: -refundAmount } });
+                await prisma.transaction.update({ where: { id: tx.id }, data: { extraProfit: 0 } });
               }
             }
 
@@ -399,7 +444,7 @@ export class DefectiveLogService {
       }
 
       return defectiveLog;
-    }, { timeout: 15000 });
+    });
 
     // Perform schedule recalculation OUTSIDE of transaction to avoid timeouts
     if (shouldRecalculate && recalcForTxId) {

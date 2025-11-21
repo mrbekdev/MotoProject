@@ -96,6 +96,7 @@ enum TransactionStatus {
   PENDING
   COMPLETED
   CANCELLED
+  IN_PROGRESS
 }
 
 enum TaskStatus {

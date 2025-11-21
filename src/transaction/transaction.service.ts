@@ -409,6 +409,16 @@ export class TransactionService {
       if ((transactionData as any)?.type === 'SALE') {
         for (const it of itemsList) {
           if (!it.productId) continue;
+
+          // Zero-priced (bonus) lines should NOT decrement stock here.
+          // They are handled separately via TransactionBonusProductService.
+          const spCandidate = Number(it.sellingPrice ?? it.price ?? 0);
+          const pCandidate = Number(it.price ?? 0);
+          const isBonusLine = (spCandidate === 0 || pCandidate === 0) && it.productId != null;
+          if (isBonusLine) {
+            continue;
+          }
+
           const prod = await tx.product.findUnique({
             where: { id: it.productId },
             include: { category: { select: { type: true } } }
@@ -1842,8 +1852,23 @@ export class TransactionService {
         include: { product: true }
       });
 
-      console.log(' Database dan topilgan bonus products:', bonusProducts.length, 'ta');
-      console.log(' Bonus products ma\'lumotlari:', JSON.stringify(bonusProducts, null, 2));
+      // Normalize bonus products to always have product name/model when possible
+      const bonusProductsWithInfo: any[] = [];
+      for (const bp of bonusProducts) {
+        let productInfo = bp.product;
+        if ((!productInfo || !productInfo.name) && bp.productId) {
+          try {
+            const dbProduct = await this.prisma.product.findUnique({ where: { id: Number(bp.productId) } });
+            if (dbProduct) {
+              productInfo = dbProduct as any;
+            }
+          } catch {}
+        }
+        bonusProductsWithInfo.push({ ...bp, product: productInfo });
+      }
+
+      console.log(' Database dan topilgan bonus products:', bonusProductsWithInfo.length, 'ta');
+      console.log(' Bonus products ma\'lumotlari:', JSON.stringify(bonusProductsWithInfo, null, 2));
 
       let totalBonusProductsValue = 0;
       let totalBonusProductsCount = 0;
@@ -1898,8 +1923,8 @@ export class TransactionService {
       // Transaction darajasida umumiy narx farqini jamlash uchun akkumulyator
       // Build gifted list string once so it is available for all descriptions below
       let giftedListStr = '';
-      if (bonusProducts && bonusProducts.length > 0) {
-        giftedListStr = bonusProducts
+      if (bonusProductsWithInfo && bonusProductsWithInfo.length > 0) {
+        giftedListStr = bonusProductsWithInfo
           .map((bp: any) => `${bp.product?.name || 'Номаълум махсулот'} (${bp.product?.model || '-'}) x${bp.quantity}`)
           .join('; ');
       } else {
@@ -1910,7 +1935,21 @@ export class TransactionService {
           return (sp === 0 || p === 0) && (it.productId != null);
         });
         if (zeroPriceItems.length > 0) {
-          giftedListStr = zeroPriceItems
+          const enrichedZeroPriceItems: any[] = [];
+          for (const it of zeroPriceItems) {
+            let productInfo = it.product;
+            if ((!productInfo || !productInfo.name) && it.productId) {
+              try {
+                const dbProduct = await this.prisma.product.findUnique({ where: { id: Number(it.productId) } });
+                if (dbProduct) {
+                  productInfo = dbProduct as any;
+                }
+              } catch {}
+            }
+            enrichedZeroPriceItems.push({ ...it, product: productInfo });
+          }
+
+          giftedListStr = enrichedZeroPriceItems
             .map((it: any) => `${it.productName || it.product?.name || 'Номаълум махсулот'} (${it.product?.model || it.model || '-'}) x${Number(it.quantity || 1)}`)
             .join('; ');
         }
@@ -2091,8 +2130,9 @@ export class TransactionService {
       if (totalBonusForSeller > 0) {
         // Bonus products ma'lumotlarini kurs orqali UZS ga konvert qilib tayyorlaymiz
         const bonusProductsData = [] as any[];
-        for (const bp of bonusProducts) {
-          const priceInUzs = Math.round(Number(bp.product?.price || 0) * usdToSomRate);
+        for (const bp of bonusProductsWithInfo) {
+          const basePrice = bp.product?.price ?? 0;
+          const priceInUzs = Math.round(Number(basePrice) * usdToSomRate);
           bonusProductsData.push({
             productId: bp.productId,
             productName: bp.product?.name || 'Номаълум махсулот',
@@ -2107,22 +2147,27 @@ export class TransactionService {
         const costPlusBonus = Math.round(totalCostAll) + Math.round(totalBonusProductsValue);
         const transactionNetSurplus = sellingTotal - costPlusBonus;
 
-        // primary* variables are computed above for use in both bonus and penalty descriptions
+        // Faqat umumiy natija foyda bo'lsa (transactionNetSurplus > 0) bonus yozamiz.
+        // Aks holda, bonus o'rniga faqat PENALTY yozuvlari qoladi.
+        if (transactionNetSurplus > 0) {
+          // primary* variables are computed above for use in both bonus and penalty descriptions
+          const bonusData = {
+            userId: soldByUserId,
+            branchId: branchContextId || undefined,
+            amount: totalBonusForSeller,
+            reason: 'SALES_BONUS',
+            description: `Mahsulot(lar)ni kelish narxidan yuqori bahoda sotgani uchun avtomatik bonus. Transaction ID: ${transaction.id}. ${primaryName ? `Mahsulot: ${primaryName} (${primaryModel || '-'})` + ', ' : ''}${primarySellingPerUnit ? `Sotish: ${primarySellingPerUnit.toLocaleString()} som, ` : `Sotish: ${sellingTotal.toLocaleString()} som, `}${primaryCostPerUnit ? `Kelish: ${primaryCostPerUnit.toLocaleString()} som, ` : `Kelish: ${Math.round(totalCostAll).toLocaleString()} som, `}Bonus mahsulotlar: ${Math.round(totalBonusProductsCount)} ta, ${Math.round(totalBonusProductsValue).toLocaleString()} som${giftedListStr ? ` ( ${giftedListStr} )` : ''}, Sof foyda: ${transactionNetSurplus.toLocaleString()} som, ${primaryPercent != null ? `Bonus foizi: ${primaryPercent}%, ` : ''}Bonus: ${totalBonusForSeller.toLocaleString()} som.`,
+            bonusProducts: bonusProductsData.length > 0 ? bonusProductsData : null,
+            transactionId: transaction.id,
+            bonusDate: new Date().toISOString()
+          } as any;
 
-        const bonusData = {
-          userId: soldByUserId,
-          branchId: branchContextId || undefined,
-          amount: totalBonusForSeller,
-          reason: 'SALES_BONUS',
-          description: `Mahsulot(lar)ni kelish narxidan yuqori bahoda sotgani uchun avtomatik bonus. Transaction ID: ${transaction.id}. ${primaryName ? `Mahsulot: ${primaryName} (${primaryModel || '-'})` + ', ' : ''}${primarySellingPerUnit ? `Sotish: ${primarySellingPerUnit.toLocaleString()} som, ` : `Sotish: ${sellingTotal.toLocaleString()} som, `}${primaryCostPerUnit ? `Kelish: ${primaryCostPerUnit.toLocaleString()} som, ` : `Kelish: ${Math.round(totalCostAll).toLocaleString()} som, `}Bonus mahsulotlar: ${Math.round(totalBonusProductsCount)} ta, ${Math.round(totalBonusProductsValue).toLocaleString()} som${giftedListStr ? ` ( ${giftedListStr} )` : ''}, Sof foyda: ${transactionNetSurplus.toLocaleString()} som, ${primaryPercent != null ? `Bonus foizi: ${primaryPercent}%, ` : ''}Bonus: ${totalBonusForSeller.toLocaleString()} som.`,
-          bonusProducts: bonusProductsData.length > 0 ? bonusProductsData : null,
-          transactionId: transaction.id,
-          bonusDate: new Date().toISOString()
-        } as any;
-
-        console.log(' Transaction-level BONUS yaratilmoqda:', bonusData);
-        await this.bonusService.create(bonusData, createdById || soldByUserId);
-        console.log(` BONUS YARATILDI (transaction-level): ${totalBonusForSeller} som`);
+          console.log(' Transaction-level BONUS yaratilmoqda:', bonusData);
+          await this.bonusService.create(bonusData, createdById || soldByUserId);
+          console.log(` BONUS YARATILDI (transaction-level): ${totalBonusForSeller} som`);
+        } else {
+          console.log(' Transaction-level BONUS SKIPPED: transactionNetSurplus <= 0, faqat penalty yozuvlari qoladi');
+        }
       }
 
       // Transaction darajasida jami (foyda yoki kamomad) ni hisoblab, database ga saqlash
@@ -2150,8 +2195,9 @@ export class TransactionService {
         try {
           // Build bonusProducts payload once for penalties as well
           const penaltyBonusProductsData = [] as any[];
-          for (const bp of bonusProducts) {
-            const priceInUzs = Math.round(Number(bp.product?.price || 0) * usdToSomRate);
+          for (const bp of bonusProductsWithInfo) {
+            const basePrice = bp.product?.price ?? 0;
+            const priceInUzs = Math.round(Number(basePrice) * usdToSomRate);
             penaltyBonusProductsData.push({
               productId: bp.productId,
               productName: bp.product?.name || 'Номаълум махсулот',
